@@ -4,13 +4,13 @@ People need a fast way to do math in a terminal. They need to change a temperatu
 
 ## What Changes
 
-- Add, subtract, multiply, and divide numbers.
-- Change temperatures between Celsius, Fahrenheit, and Kelvin, and reject a bad change.
-- Set which numbers the tool can use.
-- Set how the tool rounds and shows a result.
-- Show errors for bad command forms, bad numbers, and bad units.
-- For division by zero, show an error on standard error and fail.
-- For a value below absolute zero, show an error on standard error and fail.
+- Use `calculator` with fixed command forms for add, subtract, multiply, and divide. Each action takes a left value and then a right value.
+- Use `calculator convert <value> --from <unit> --to <unit>` to change temperatures between Celsius, Fahrenheit, and Kelvin. Reject a bad change.
+- Accept base-ten numbers with an optional leading minus sign. Use one or more digits, with an optional decimal point and one or more digits after it. Reject a plus sign, an exponent, `NaN`, and infinity.
+- Round a result to at most six decimal places. If the next digit is five or more, round away from zero. Remove trailing zeros and an empty decimal point. Write only the result and a newline to standard output. Write nothing to standard error and exit with status `0`.
+- Show an error for an unknown action, a missing argument or option, an extra argument, a repeated option, a bad number, or a bad unit. Write only the error and a newline to standard error. Write nothing to standard output and exit with status `2`.
+- For division by zero, write only an error to standard error and exit with status `2`.
+- For a value below absolute zero, write only an error to standard error and exit with status `2`.
 
 ## Capabilities
 
