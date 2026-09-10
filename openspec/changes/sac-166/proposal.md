@@ -7,7 +7,7 @@ People need a quick way to solve simple sums and change common units in a termin
 - Add `calculator <command> <values>` commands that add, subtract, multiply, and divide whole numbers or decimals. Math commands take two values, and unit commands take one. A valid command prints only its result and a line break to standard output, then returns status zero.
 - Add commands that change Celsius to Fahrenheit and back.
 - Add commands that change degrees to radians and back.
-- Add `--help` for the main tool and each command. Help shows a use line, command name, goal, value names, and an example on standard output, then returns status zero. Bad input writes a short error and a help hint to standard error, returns a non-zero status, and does not print a result.
+- Add `--help` for the main tool and each command. Help shows a use line, command name, goal, value names, and an example on standard output, then returns status zero. The tool rejects NaN and infinity as input. It also rejects any result that is not finite. A failure writes a short error and a help hint to standard error, returns a non-zero status, and does not print a result.
 
 ## Capabilities
 
