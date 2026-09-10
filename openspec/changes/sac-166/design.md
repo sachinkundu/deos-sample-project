@@ -140,15 +140,19 @@ flowchart TD
     Numeric -- no --> NotNumber[Failure: token is not a number]
     Numeric -- yes --> FiniteInput{All finite?}
     FiniteInput -- no --> BadInput[Failure: token is not a finite number]
-    FiniteInput -- yes --> Zero{Divide by +0 or -0?}
+    FiniteInput -- yes --> DivideCommand{Command is divide?}
+    DivideCommand -- no --> Evaluate[Evaluate selected function]
+    DivideCommand -- yes --> Zero{Second operand is +0 or -0?}
     Zero -- yes --> DivideZero[Failure: division by zero]
-    Zero -- no --> Evaluate[Evaluate selected function]
+    Zero -- no --> Evaluate
     Evaluate --> FiniteResult{Result finite?}
     FiniteResult -- no --> BadResult[Failure: result is not finite]
     FiniteResult -- yes --> Success[Format and emit success]
 ```
 
 Help is recognized only in the two exact forms above. Negative operands such as `-2` are positional values, not options. An invocation with extra tokens, including tokens after `--help`, follows the normal unknown-command or wrong-arity path instead of silently ignoring input.
+
+The zero-divisor gate runs only when the selected command is `divide`; after exact arity validation, it compares that command's second parsed operand with zero. Every other command proceeds directly from finite-input validation to its selected calculator.
 
 Each numeric parser must consume the full token. The standard-library regular expression `^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$` first accepts signed decimal whole or fractional forms, with an optional decimal exponent; `float(token)` then converts the accepted token to binary64. The parser also recognizes the exact tokens `NaN`, `Infinity`, `+Infinity`, and `-Infinity` before applying `math.isfinite`, so they produce the required “not a finite number” reason. A finite-form token that converts to infinity follows the same path. All other text, including Python spellings such as `inf`, case variants, underscores, hexadecimal numbers, whitespace, or a numeric prefix followed by junk, is “not a number.” Validation reports the first bad operand from left to right.
 
@@ -213,7 +217,7 @@ Every expected failure takes the same output path: no standard output, the reaso
 - [Python numeric parsing accepts spellings outside the chosen grammar] → Gate `float` conversion with the explicit full-token grammar and test exponent input, rejected spellings, signed zero, large magnitudes, and non-finite conversions.
 - [Formatting behavior could change in a future runtime] → Require CPython 3.11 or newer, centralize `repr` normalization, and pin exact output cases in process tests across each supported release line.
 - [A naive conversion order can overflow before division rescales the value] → Precompute combined binary64 scale factors, then apply the shared finite-result postcondition to the actual returned value.
-- [Command metadata can disagree with a calculator signature] → Give calculators one uniform list-of-values interface and derive arity solely from `operandNames`.
+- [Command metadata can disagree with a calculator signature] → Give calculators one uniform list-of-values interface and derive arity solely from `operand_names`.
 - [Direct writes can violate empty standard output on late failure] → Return an `Outcome` and emit once at the process boundary.
 
 ## Migration Plan
