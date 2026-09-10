@@ -2,7 +2,7 @@
 
 This is a new, stateless command-line program; there is no existing API or stored data to preserve. The approved behavior is defined by [proposal.md](proposal.md) and [specs/calculator-cli/spec.md](specs/calculator-cli/spec.md). The implementation must keep standard output machine-friendly while providing help and failures on the specified streams.
 
-No repository-specific framework or external dependency is required by the checked inputs. The design therefore uses one executable, the language runtime's standard library, and pure calculation functions. All numeric inputs and results use IEEE 754 binary64 values. This format provides the required decimal, infinity, overflow, and π behavior without introducing a decimal or units library.
+The supported runtime is CPython 3.11 or newer. The installed program uses only the Python standard library and pure calculation functions; packaging tools are build-time concerns and are not runtime dependencies. Python `float` supplies the chosen IEEE 754 binary64 representation, while `math.isfinite` and `math.pi` provide the finite checks and π value. This format provides the required decimal, infinity, overflow, and π behavior without introducing a decimal or units library.
 
 ## Goals / Non-Goals
 
@@ -21,7 +21,7 @@ No repository-specific framework or external dependency is required by the check
 
 ## Decisions
 
-The design uses one table-driven execution pipeline, explicit outcome values, binary64 calculations, and centralized formatting. The sections below give each decision, rationale, and rejected alternatives.
+The design uses a CPython package with one installed console entry point, a table-driven execution pipeline, explicit outcome values, binary64 calculations, and centralized formatting. The sections below give each decision, rationale, and rejected alternatives.
 
 ## Component Diagram
 
@@ -31,8 +31,9 @@ The executable contains a process adapter, a command registry/router, shared val
 
 ```mermaid
 flowchart LR
-    Shell[Shell argv] --> Entry[Process adapter]
-    Entry --> Router[Command registry and router]
+    Shell[Shell argv] --> Script[Installed calculator entry point]
+    Script --> Entry[calculator_cli.cli process adapter]
+    Entry --> Router[calculator_cli.core registry and router]
     Router --> Help[Help renderer]
     Router --> Validate[Arity and number validation]
     Validate --> Calculate[Pure arithmetic and conversion functions]
@@ -53,6 +54,45 @@ Alternatives considered:
 - Separate hand-written subcommand branches would duplicate arity checks, failure handling, and help metadata.
 - A third-party CLI framework would supply routing and help, but the checked requirements are small and do not justify a dependency or framework-specific parsing behavior.
 
+### Decision: Package for CPython 3.11+ with a console-script entry point
+
+The implementation uses the following layout:
+
+```text
+pyproject.toml
+src/calculator_cli/__init__.py
+src/calculator_cli/cli.py
+src/calculator_cli/core.py
+tests/test_core.py
+tests/test_cli.py
+```
+
+`pyproject.toml` uses this minimal packaging contract:
+
+```toml
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "calculator-cli"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+calculator = "calculator_cli.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+```
+
+Setuptools is isolated to build and installation; it is not imported by the installed program. The generated launcher calls `calculator_cli.cli:main`; `main(argv: Sequence[str] | None = None) -> int` reads `sys.argv[1:]` when no argument list is supplied, emits the completed outcome once, and returns the selected status for the launcher to pass to the shell.
+
+`calculator_cli.core` owns command metadata, routing, validation, calculations, help rendering, and result formatting without reading process globals or writing streams. `calculator_cli.cli` owns only the process boundary and output adapter. `__init__.py` has no import-time behavior. Tests use the standard-library `unittest` and `subprocess` modules: unit tests exercise `core` directly, while process tests invoke the installed `calculator` launcher and capture its streams and status.
+
+CPython 3.11 is the minimum so parsing and shortest-representation behavior are tested against one explicit runtime baseline. Supporting older Python versions or alternate Python implementations was rejected because it would widen the parsing, formatting, and packaging compatibility matrix without changing the approved CLI behavior. A standalone script was rejected because it would not provide a standard install mechanism for the required command. A third-party runtime CLI or numeric library was rejected because the standard library supplies every required operation.
+
 ## Minimal Data Model
 
 ### Decision: Model execution as a value and emit once
@@ -61,12 +101,12 @@ The core returns exactly one outcome to the process adapter. It does not write d
 
 | Type | Fields | Purpose |
 | --- | --- | --- |
-| `CommandSpec` | `name`, `operandNames`, `goal`, `example`, `calculate(values)` | Registry entry used by routing, help, arity validation, and execution. |
-| `Outcome.Success` | finite binary64 `value` | Calculation completed and is ready for formatting. |
-| `Outcome.Help` | rendered `text` | Main or command help completed successfully. |
-| `Outcome.Failure` | `kind`, short `reason` | Expected input or calculation failure. |
+| `CommandSpec` frozen dataclass | `name: str`, `operand_names: tuple[str, ...]`, `goal: str`, `example: str`, `calculate: Callable[[tuple[float, ...]], float]` | Registry entry used by routing, help, arity validation, and execution. |
+| `Success` frozen dataclass | finite `value: float` | Calculation completed and is ready for formatting. |
+| `Help` frozen dataclass | rendered `text: str` | Main or command help completed successfully. |
+| `Failure` frozen dataclass | `kind: FailureKind`, short `reason: str` | Expected input or calculation failure. |
 
-Arguments and outcomes exist only for one invocation; nothing is persisted. `operandNames.length` is the command arity, so arity is not stored twice. Failure kinds are `missing-command`, `unknown-command`, `wrong-arity`, `not-a-number`, `non-finite-input`, `division-by-zero`, and `non-finite-result`.
+Arguments and outcomes exist only for one invocation; nothing is persisted. `len(operand_names)` is the command arity, so arity is not stored twice. `FailureKind` is an enum with `missing-command`, `unknown-command`, `wrong-arity`, `not-a-number`, `non-finite-input`, `division-by-zero`, and `non-finite-result`. The core return type is the closed union `Success | Help | Failure`.
 
 The process adapter emits only after it receives a complete outcome:
 
@@ -110,7 +150,7 @@ flowchart TD
 
 Help is recognized only in the two exact forms above. Negative operands such as `-2` are positional values, not options. An invocation with extra tokens, including tokens after `--help`, follows the normal unknown-command or wrong-arity path instead of silently ignoring input.
 
-Each numeric parser must consume the full token. Its finite grammar accepts signed decimal whole or fractional forms, with an optional decimal exponent, then converts to binary64. It also recognizes the exact tokens `NaN`, `Infinity`, `+Infinity`, and `-Infinity` so they reach the finite-input check and produce the required “not a finite number” reason. A finite-form token that overflows during conversion follows the same path. All other text, including a numeric prefix followed by junk, is “not a number.” Validation reports the first bad operand from left to right.
+Each numeric parser must consume the full token. The standard-library regular expression `^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$` first accepts signed decimal whole or fractional forms, with an optional decimal exponent; `float(token)` then converts the accepted token to binary64. The parser also recognizes the exact tokens `NaN`, `Infinity`, `+Infinity`, and `-Infinity` before applying `math.isfinite`, so they produce the required “not a finite number” reason. A finite-form token that converts to infinity follows the same path. All other text, including Python spellings such as `inf`, case variants, underscores, hexadecimal numbers, whitespace, or a numeric prefix followed by junk, is “not a number.” Validation reports the first bad operand from left to right.
 
 Alternatives considered:
 
@@ -134,7 +174,7 @@ The registry maps commands to pure binary64 functions:
 | `degrees-to-radians` | `value * (π / 180)` |
 | `radians-to-degrees` | `value * (180 / π)` |
 
-The four conversion scale factors `9 / 5`, `5 / 9`, `π / 180`, and `180 / π` are computed once as binary64 constants; π is the runtime's full-precision binary64 constant. Each converter multiplies by its scale factor, with the required subtraction before the Fahrenheit-to-Celsius scale and addition after the Celsius-to-Fahrenheit scale. This grouping is algebraically equivalent to the specified formulas but avoids overflowing a numerator that a later division would bring back into range. The shared postcondition checks `isFinite(result)` after every function, including unit conversions; any genuinely non-finite final value becomes `non-finite-result`. Calculators never format or emit values. Arbitrary-precision intermediates were considered, but combined factors solve the avoidable-overflow problem without adding another number representation or dependency.
+The four conversion scale factors `9 / 5`, `5 / 9`, `math.pi / 180`, and `180 / math.pi` are computed once as Python `float` constants. Each converter multiplies by its scale factor, with the required subtraction before the Fahrenheit-to-Celsius scale and addition after the Celsius-to-Fahrenheit scale. This grouping is algebraically equivalent to the specified formulas but avoids overflowing a numerator that a later division would bring back into range. The shared postcondition applies `math.isfinite(result)` after every function, including unit conversions; any genuinely non-finite final value becomes `non-finite-result`. Calculators never format or emit values. Arbitrary-precision intermediates were considered, but combined factors solve the avoidable-overflow problem without adding another number representation or dependency.
 
 Binary64 is preferred over arbitrary-precision decimal because angle conversion already requires an approximate π and the specification explicitly requires detection of non-finite overflow in the chosen format. The trade-off is ordinary floating-point rounding, which tests assess with exact expected text only for exactly representable/simple results and with the specified tolerance for angle results.
 
@@ -142,7 +182,7 @@ Binary64 is preferred over arbitrary-precision decimal because angle conversion 
 
 ### Decision: Use one canonical result formatter and generated help
 
-The result formatter emits the runtime's shortest round-trippable decimal representation of the finite binary64 result. It removes an unnecessary trailing `.0` and normalizes negative zero to `0`. It adds no labels, units, spaces, or explanatory text. Scientific notation is allowed when it is the shortest faithful representation. This policy gives simple outputs such as `5`, `3.75`, and `180` while retaining useful precision for π-based results.
+The result formatter starts with Python's `repr(float)`, which emits the shortest round-trippable decimal representation on supported CPython versions. It returns `0` when the value compares equal to zero, so both signs of zero are normalized. Otherwise it removes `.0` only when that exact suffix ends a non-exponent representation. It adds no labels, units, spaces, or explanatory text. Scientific notation is allowed when `repr` selects it as the shortest faithful representation. This policy gives simple outputs such as `5`, `3.75`, and `180` while retaining useful precision for π-based results.
 
 The help renderer reads only `CommandSpec` metadata. Main help starts with a `calculator <command> <values>` usage line and lists all eight commands. Command help includes a command-specific usage line, command name, goal, operand names, and its example. Renderers always end help text with one line break.
 
@@ -170,11 +210,36 @@ Every expected failure takes the same output path: no standard output, the reaso
 ## Risks / Trade-offs
 
 - [Binary64 rounds some decimal calculations] → Use shortest round-trippable output, preserve full internal precision, and use tolerance-based assertions where exact decimal text is not required.
-- [Runtime numeric parsers and formatters differ] → Wrap both behind shared parser/formatter functions and test full-token parsing, exponent input, signed zero, large magnitudes, and representative decimal/angle outputs.
+- [Python numeric parsing accepts spellings outside the chosen grammar] → Gate `float` conversion with the explicit full-token grammar and test exponent input, rejected spellings, signed zero, large magnitudes, and non-finite conversions.
+- [Formatting behavior could change in a future runtime] → Require CPython 3.11 or newer, centralize `repr` normalization, and pin exact output cases in process tests across each supported release line.
 - [A naive conversion order can overflow before division rescales the value] → Precompute combined binary64 scale factors, then apply the shared finite-result postcondition to the actual returned value.
 - [Command metadata can disagree with a calculator signature] → Give calculators one uniform list-of-values interface and derive arity solely from `operandNames`.
 - [Direct writes can violate empty standard output on late failure] → Return an `Outcome` and emit once at the process boundary.
 
 ## Migration Plan
 
-There is no data or API migration. Add the new executable and its unit and process-level tests, then make the build/install path expose it as `calculator`. Before release, exercise every command, both help paths, and each failure category against captured standard output, standard error, and status. Rollback consists of removing the new executable from the build/install output; no state restoration is needed.
+There is no data or API migration. Build and install the package in a clean CPython 3.11 virtual environment from the repository root, then smoke-check the installed launcher with these exact commands:
+
+```sh
+python3.11 -m venv .venv-calculator-smoke
+. .venv-calculator-smoke/bin/activate
+python -m pip install .
+python -m pip check
+test "$(command -v calculator)" = "$VIRTUAL_ENV/bin/calculator"
+calculator --help
+test "$(calculator add 2 3)" = "5"
+test "$(calculator celsius-to-fahrenheit 0)" = "32"
+```
+
+Process tests must additionally exercise all eight commands, both help paths, and every failure category while asserting standard output, standard error, and exit status. Promotion uses the same built distribution and `[project.scripts]` launcher mechanism in the target environment.
+
+Rollback uninstalls the distribution that owns the launcher and verifies that the environment no longer contains the command:
+
+```sh
+python -m pip uninstall -y calculator-cli
+hash -r
+test ! -e "$VIRTUAL_ENV/bin/calculator"
+deactivate
+```
+
+No state restoration or data rollback is needed.
