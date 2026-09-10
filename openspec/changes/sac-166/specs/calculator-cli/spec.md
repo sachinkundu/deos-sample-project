@@ -86,7 +86,7 @@ The tool MUST show a short use line and all command names when run with `--help`
 
 ### Requirement: Report bad input clearly
 
-The tool MUST reject an unknown command. It MUST reject too few or too many values. It MUST reject a value that is not a number. It MUST also reject division by zero. It MUST write a short reason to standard error. It MUST give a non-zero status and show a hint to run `calculator --help`. It MUST NOT print a result when it fails.
+The tool MUST reject an unknown command. It MUST reject too few or too many values. Each input value MUST be a finite number in the chosen number format. The tool MUST reject NaN, positive infinity, and negative infinity. It MUST also reject division by zero. Each result MUST be finite in the chosen number format. The tool MUST reject an operation or unit change if its result is not finite, such as an operation that overflows that format. For each failure, it MUST write a short reason and a hint to run `calculator --help` to standard error. It MUST give a non-zero status. It MUST NOT print a result.
 
 #### Scenario: Reject an unknown command
 
@@ -108,7 +108,27 @@ The tool MUST reject an unknown command. It MUST reject too few or too many valu
 - **WHEN** a person runs `calculator multiply two 3`
 - **THEN** the tool fails and says that `two` is not a number
 
+#### Scenario: Reject NaN
+
+- **WHEN** a person runs `calculator add NaN 3`
+- **THEN** the tool fails and says that `NaN` is not a finite number
+
+#### Scenario: Reject infinity
+
+- **WHEN** a person runs `calculator celsius-to-fahrenheit Infinity`
+- **THEN** the tool fails and says that `Infinity` is not a finite number
+
+#### Scenario: Reject negative infinity
+
+- **WHEN** a person runs `calculator radians-to-degrees -Infinity`
+- **THEN** the tool fails and says that `-Infinity` is not a finite number
+
 #### Scenario: Reject division by zero
 
 - **WHEN** a person runs `calculator divide 4 0`
 - **THEN** the tool fails and says that division by zero is not allowed
+
+#### Scenario: Reject a result that is not finite
+
+- **WHEN** a person multiplies two finite values whose product overflows the chosen number format
+- **THEN** the tool fails and says that the result is not finite
