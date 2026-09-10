@@ -132,3 +132,8 @@ The tool MUST reject an unknown command. It MUST reject too few or too many valu
 
 - **WHEN** a person multiplies two finite values whose product overflows the chosen number format
 - **THEN** the tool fails and says that the result is not finite
+
+#### Scenario: Reject a unit result that is not finite
+
+- **WHEN** a person changes a finite Celsius value whose Fahrenheit result overflows the chosen number format
+- **THEN** standard output is empty, standard error gives the short reason that the result is not finite and a hint to run `calculator --help`, and the tool ends with a non-zero status
