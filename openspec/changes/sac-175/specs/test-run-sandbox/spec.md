@@ -15,18 +15,18 @@ The system MUST choose the `Standard-2` sandbox tier for a new test run when the
 
 ### Requirement: Save one tier for the run and sandbox
 
-For a new test run without a `slow-ok` label, the system MUST save `Standard-2` as the tier on the run. It MUST also save `Standard-2` as the tier on the sandbox linked to that run.
+When the system chooses `Standard-2` as the default tier for a new test run, it MUST save that tier on the run and its linked sandbox.
 
 #### Scenario: Save the default tier
 
-- **WHEN** the system creates a new test run without a `slow-ok` label and its sandbox.
+- **WHEN** the system creates a new test run and chooses the `Standard-2` default tier.
 - **THEN** the saved test run tier and the saved sandbox tier are both `Standard-2`.
 
 ### Requirement: Show the saved tier in the portal
 
-For a new test run without a `slow-ok` label, the portal MUST show `Standard-2` as the saved sandbox tier for that run.
+The portal MUST show `Standard-2` for a test run that has `Standard-2` as its saved sandbox tier.
 
 #### Scenario: View a run that uses the default tier
 
-- **WHEN** a person views a new test run that was created without a `slow-ok` label.
+- **WHEN** a person views a test run with `Standard-2` as its saved sandbox tier.
 - **THEN** the portal shows `Standard-2` for that run.
