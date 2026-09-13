@@ -6,7 +6,7 @@ New test runs use the right sandbox tier, and people can see the saved choice in
 
 ### Requirement: Default new test runs to Standard-2
 
-The system MUST choose the `Standard-2` sandbox tier for a new test run when the run has no `slow-ok` label. It MUST use that choice when it creates the sandbox for the run.
+The system MUST choose the `Standard-2` sandbox tier for a new test run when the run has no `slow-ok` label.
 
 #### Scenario: Create a run without the slow-ok label
 
