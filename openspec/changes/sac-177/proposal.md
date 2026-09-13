@@ -4,10 +4,10 @@ We need a small notes app to test the new review flow. The plan must be easy to 
 
 ## What Changes
 
-- Add a web page where a person can add, read, edit, and delete short notes.
+- Add a web page where a person can add, read, edit, and delete notes of up to 500 characters.
 - Save each note so it is still there after the page reloads.
-- Show clear errors when a note action fails, and keep work that was not saved.
-- Cover the main note actions, empty data, invalid text, saved data, and service errors with tests.
+- Show clear, safe errors when a note action fails, and keep work that was not saved. An error must not show a stack trace, query text, or secret data.
+- Define test cases in the behavior spec for the main note actions, empty data, invalid text, saved data, and service errors.
 - Save the review findings, source links, author replies, and author and reviewer logs as review evidence.
 - Make the findings, sources, and replies easy to read, and make each saved log open from the portal.
 
