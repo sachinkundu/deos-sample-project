@@ -26,7 +26,11 @@ The calculator must preserve the text being entered (including an unfinished dec
 
 The implementation will consist of a semantic HTML shell, CSS, and JavaScript ES modules. Vite will provide the local development server and production asset build, Vitest will exercise the pure calculator module, and Playwright will cover real button, keyboard, and viewport behavior. Application code will use `big.js` for decimal arithmetic but will not depend on a UI framework.
 
-The production build will be static and deploy to Cloudflare Pages. Pages supports static HTML and pull-request preview deployments, which directly supplies the required working review URL: https://developers.cloudflare.com/pages/framework-guides/deploy-anything/.
+The production build will be static and deploy to a Direct Upload Cloudflare Pages project named `sac-225-calculator`. The repository's preview job will run the production build, then run `npx wrangler pages deploy dist --project-name=sac-225-calculator --branch=review-sac-225`. That fixed non-production branch produces the moving alias `review-sac-225.sac-225-calculator.pages.dev`; the job will capture the deployment's unique hash URL and use that immutable URL for final review. Cloudflare documents both the `--branch` preview command and the branch alias behavior: https://developers.cloudflare.com/pages/get-started/direct-upload/.
+
+Repository maintainers own the Pages project in the Cloudflare account selected by the protected `CLOUDFLARE_ACCOUNT_ID` CI secret. A separate protected `CLOUDFLARE_API_TOKEN` has only Account / Cloudflare Pages / Edit permission in that account; neither value reaches the browser bundle or untrusted pull-request jobs. Cloudflare's Direct Upload CI guide defines those credentials and the Wrangler deployment flow: https://developers.cloudflare.com/pages/how-to/use-direct-upload-with-continuous-integration/.
+
+The preview deployment remains publicly readable with no Cloudflare Access policy so the final reviewer can open it; preview URLs are public by default, while enabling Access restricts them: https://developers.cloudflare.com/pages/configuration/preview-deployments/. The automatic job runs only for trusted same-repository branches after checks pass. If it is skipped, lacks secrets, or fails, a maintainer reruns the same protected job with `workflow_dispatch` for the reviewed commit; as an operational fallback, the maintainer may run the identical Wrangler command against that checked-out commit with the same account and token. No URL is submitted for review until the captured immutable URL passes an HTTPS smoke test.
 
 Alternative considered: a component framework. It would add build and runtime concepts without improving this single-view state machine. Alternative considered: server-rendered calculation. It would add latency and failure surfaces even though all inputs and state are local.
 
@@ -55,9 +59,9 @@ Alternative considered: separate click and keyboard calculation handlers. That d
 Reducer behavior is deterministic:
 
 1. A digit replaces the initial `0`, otherwise appends. A decimal appends only when `entry` has no decimal point; from initial `0` it produces `0.`.
-2. A digit or decimal in `awaiting_rhs` starts a fresh right-hand entry. The same input in `result` starts a new calculation and clears the stored operation.
-3. An operator while entering validates and copies the entry string to `leftOperand`, stores the operator, and enters `awaiting_rhs`. Selecting another operator before a right operand replaces the pending operator without calculating.
-4. Calculate is a no-op unless an operator exists and a right operand has been entered. Otherwise it evaluates exactly one binary operation, formats the result into `entry`, clears the pending operation, and enters `result`.
+2. Selecting an operator for a left entry stores its normalized value in `leftOperand`, stores the operator, enters `awaiting_rhs`, and leaves the existing `entry` visible. In `awaiting_rhs`, calculate is a no-op and another operator only replaces the pending operator, so `8 + =` stays at `8` with `+` pending.
+3. A digit in `awaiting_rhs` replaces `entry` with that digit and changes the phase to `entering` while retaining `leftOperand` and `operator`; a decimal instead sets `entry` to `0.` and makes the same phase change. Thus `phase: entering` plus a non-null pending operation means that a right operand has been entered. The same digit or decimal in `result` starts a new calculation and clears the stored operation.
+4. Calculate is a no-op unless the phase is `entering` and both `leftOperand` and `operator` are non-null. Otherwise it treats the current `entry` as the right operand, evaluates exactly one binary operation, formats the result into `entry`, clears the pending operation, and enters `result`; therefore `8 + 2 =` renders `10`. Because implicit chaining is out of scope, selecting an operator while a right operand is being entered is ignored until calculate or clear.
 5. An operator selected after a result uses that result as the next left operand. Repeated calculate with no pending operation is a no-op.
 6. Clear returns the exact initial state from every phase, including error.
 
@@ -65,9 +69,11 @@ Alternative considered: deriving behavior from loosely related flags such as `sh
 
 ### 4. Use decimal arithmetic and limit rounding to non-terminating division
 
-Typed values and stored operands remain strings. At calculation time, strict `big.js` instances are created from those strings. Addition, subtraction, and multiplication return exact decimal results; division is the only supported operation that can require rounding. Configure a private `Big` constructor with 20 decimal places and round-half-up, reject a right operand equal to zero before dividing, then render the result with `toString()`. The library documents exact non-division arithmetic and its division-specific decimal-place and rounding controls: https://github.com/MikeMcl/big.js/.
+Typed values and stored operands remain strings. Before an entry becomes an operand, `normalizeOperand` removes exactly one trailing decimal point, so `0.` becomes `0` and `1.` becomes `1`; it makes no other textual or numeric conversion. Operator selection stores the normalized left operand, and calculate normalizes the right operand. This preserves unfinished text while typing but guarantees that strict `big.js` receives a completed decimal string.
 
-This policy preserves all entered significant digits for `+`, `-`, and `*`, so `1234567890123 + 1` displays `1234567890124`. It also makes `0.1 + 0.2` exactly `0.3`. A terminating quotient is shown without unnecessary trailing zeros; a repeating quotient is rounded to at most 20 decimal places. Negative zero is normalized to `0`.
+At calculation time, strict `big.js` instances are created from the normalized strings. Addition, subtraction, and multiplication return exact decimal results; division is the only supported operation that can require rounding. Configure a private `Big` constructor with 20 decimal places and round-half-up, reject a right operand equal to zero before dividing, then render every result with `toFixed()` with no decimal-place argument. The big.js API defines the division controls and specifies that `toFixed()` without a decimal-place argument returns normal notation regardless of the `NE` and `PE` exponent thresholds: https://mikemcl.github.io/big.js/.
+
+This policy preserves all entered significant digits for `+`, `-`, and `*`, so `1234567890123 + 1` displays `1234567890124`. It also makes `0.1 + 0.2` exactly `0.3`. A terminating quotient is shown without unnecessary trailing zeros; a repeating quotient is rounded to at most 20 decimal places. Results always use ordinary decimal notation: `1 / 10000000` displays `0.0000001`, and `1000000000000000000000 * 1` displays the complete integer rather than exponent notation. Negative zero is normalized to `0`.
 
 If construction or arithmetic throws for malformed programmatic input or an internal library failure, the reducer enters the defensive `result_unavailable` error and renders `Result unavailable`. Clear resets it. This fallback does not replace the required division-by-zero message.
 
@@ -83,7 +89,7 @@ Alternative considered: fixed pixel widths for the panel and buttons. They make 
 
 ### 6. Make tests and review proof exercise the same public behavior
 
-Vitest table-driven tests will cover all four operations, decimal entry, duplicate-decimal rejection, exact `0.1 + 0.2`, the large exact boundary `1234567890123 + 1`, repeating-division rounding, negative results, clear from partial/result/error states, operator replacement, ignored actions in error, and recovery after division by zero.
+Vitest table-driven tests will cover all four operations, decimal entry, duplicate-decimal rejection, exact `0.1 + 0.2`, the large exact boundary `1234567890123 + 1`, ordinary-notation boundaries `1 / 10000000` and `1000000000000000000000 * 1`, repeating-division rounding, negative results, clear from partial/result/error states, operator replacement, ignored actions in error, and recovery after division by zero. Transition tests will assert `8 + =` is unchanged, `8 + 2 =` is `10`, `1. + 2 =` is `3`, and `1 + 2. =` is `3`.
 
 Playwright will interact through actual buttons and keyboard events. Its scenarios will cover decimal entry by each input method, all operations across the suite, `Enter`, `=`, `Escape`, visible results and error text, and a fresh calculation after clear. Responsive checks will run at 320px and a desktop width.
 
@@ -130,8 +136,8 @@ The implementation boundaries are:
 The complete in-memory state is:
 
 ```text
-entry: string
-leftOperand: decimal string | null
+entry: input or result decimal string
+leftOperand: normalized decimal string | null
 operator: "+" | "-" | "*" | "/" | null
 phase: "entering" | "awaiting_rhs" | "result" | "error"
 error: "divide_by_zero" | "result_unavailable" | null
@@ -139,12 +145,14 @@ error: "divide_by_zero" | "result_unavailable" | null
 
 Initial and cleared state is `{ entry: "0", leftOperand: null, operator: null, phase: "entering", error: null }`. No field is persisted. The visible display is derived from `error` (`Cannot divide by zero` or `Result unavailable`) when the phase is `error`, and from `entry` in every other phase.
 
+While `phase` is `awaiting_rhs`, `entry` retains the visible left-entry text and calculate cannot run. After the first right-hand digit or decimal, `phase` is `entering`, `entry` holds the right-entry text, and the non-null `leftOperand` and `operator` distinguish that state from left-entry input.
+
 State invariants:
 
 - `awaiting_rhs` always has a non-null `leftOperand` and `operator`.
 - `error` phase has a non-null `error` code and clears `leftOperand` and `operator`; all actions except clear are ignored. Every other phase has `error: null`.
-- `entry` is always renderable text. User entry contains digits and at most one decimal point; a result may additionally contain a leading minus sign or exponent notation.
-- `leftOperand` is copied only after validating a completed `entry`; the displayed entry string is never reconstructed while the person is still typing.
+- `entry` is always renderable text. User entry contains digits and at most one decimal point; a result may additionally contain a leading minus sign but never exponent notation.
+- `leftOperand` is copied only after applying the trailing-decimal normalization rule; the displayed entry string is never reconstructed while the person is still typing.
 
 ## Event Flow
 
@@ -161,24 +169,35 @@ click or keydown
 
 For `8 / 0 =`, the operator action stores `8`, the digit action starts the right entry as `0`, and calculate detects the zero right operand before division. The reducer enters `error`, clears the pending operation, and the renderer shows `Cannot divide by zero`. Further digits, decimals, operators, and calculate are ignored. Clear or `Escape` creates the initial state, after which `8 / 2 =` follows the normal flow and renders `4`.
 
+For `1. + 2 =`, the left display remains `1.` when operator selection normalizes and stores `1`. Entering `2` moves from `awaiting_rhs` to `entering` and replaces the display. Calculate normalizes `2`, evaluates `1 + 2`, clears the pending fields, enters `result`, and renders `3`.
+
 ## Failure Modes
 
 - **Duplicate decimal input** → Return unchanged state; do not show an error or mutate the current entry.
 - **Calculate without both operands** → Return unchanged state so no stale or invented operand is used.
+- **Operator followed immediately by calculate** → Keep the `awaiting_rhs` state and visible left entry; do not invent or reuse a right operand.
+- **Operand ends in a decimal point** → Strip the trailing point only at the operand boundary, then evaluate the completed decimal value.
 - **Division by zero, including `0.0`** → Enter the locked error phase with exactly `Cannot divide by zero`; only clear recovers.
 - **Invalid decimal operation or unexpected arithmetic failure** → Show `Result unavailable`, clear pending arithmetic, and require clear before continuing.
 - **Keyboard default or focused-button double dispatch** → Prevent the default action for each recognized calculator key and dispatch once through the keyboard adapter.
 - **Control, Meta, Alt, unknown, or composing keyboard input** → Ignore it without state or display changes; allow Shift when it produces a recognized `event.key` such as `+` or `*`.
 - **Long display content at narrow width** → Wrap within the output and panel; never grow the document's inline size.
 - **Static asset or build failure** → Fail the build/check pipeline and do not present that deployment as the review preview.
-- **Preview deployment failure** → Keep the last successful deployment intact, fix the build or configuration, and publish a new immutable preview before review.
+- **Preview job skipped or deployment fails** → Rerun the protected job or execute its identical Wrangler command for the reviewed commit; keep the last successful deployment intact and withhold review until a new immutable URL passes the smoke test.
 - **Evidence capture failure** → Fail the evidence job if an expected result, overlay event, or recording artifact is missing; do not substitute an unverified manual claim.
+
+## Risks / Trade-offs
+
+- **Arbitrarily long exact results can create tall displays** → Keep normal decimal notation for predictable values and wrap within the panel; tests cover horizontal containment rather than imposing an unstated precision limit.
+- **Twenty decimal places rounds repeating division** → Document that division alone is rounded half-up at that boundary and lock representative repeating quotients in unit tests.
+- **A public preview exposes this static calculator to anyone with the URL** → Deploy no secrets or user data, use the immutable URL only for review, and retain Pages' preview `noindex` behavior documented at https://developers.cloudflare.com/pages/configuration/preview-deployments/.
+- **Direct Upload depends on protected Cloudflare credentials** → Scope the token to Pages Edit in one account, keep both credentials in protected CI secrets, and provide the same-command maintainer fallback.
 
 ## Migration Plan
 
 1. Add the static source, test tooling, and deterministic build in the implementation change.
 2. Run unit, browser, and production-build checks locally or in CI, including the 320px geometry assertions.
-3. Deploy the built static assets to a branch preview and smoke-test the resulting HTTPS URL.
+3. Deploy `dist` to the `sac-225-calculator` Pages project with branch `review-sac-225`, capture the immutable deployment URL, and smoke-test it over HTTPS; use the protected rerun or same-command fallback if automatic deployment is unavailable.
 4. Run the evidence scenario against that same preview and attach its artifacts and check results to final review.
 5. Promote only the reviewed implementation through the normal merge path.
 
