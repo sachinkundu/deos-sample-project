@@ -8,7 +8,7 @@ People need a quick way to do basic math in a web page. This small tool also giv
 - Let people enter whole numbers and decimals with on-screen buttons or a keyboard, then show the result.
 - Add a clear action that resets the calculator. Show a clear error for division by zero and let the person clear it and start again.
 - Make the page fit and stay easy to use on phone and desktop screens.
-- Provide a working preview for final review. Give visual proof of button use, keyboard use, clear recovery, and division by zero.
+- Share a working preview for final review. Give visual proof of button use, key use, clear recovery, and division by zero. Add automated tests for each math action. Test decimals, buttons, keys, clear, and recovery from division by zero.
 
 ## Capabilities
 
