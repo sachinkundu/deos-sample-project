@@ -1,12 +1,12 @@
 ## Context
 
-The approved proposal and packing-list-web-app delta spec define a new desktop-only packing-list page. The change has no server API or shared-data requirement; item names and packed state remain in one browser across refreshes. The implementation must also support a repeatable live-preview and screenshot review sequence. There is no prior design or repository guidance in the checked context.
+The approved proposal and packing-list-web-app delta spec define a new desktop-only packing-list page. The change has no server API or shared-data requirement; item names and packed state remain in one browser profile across refreshes. The implementation must also support a repeatable live-preview and screenshot review sequence. No repository guidance was included in the checked context.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Keep one canonical in-memory list and render every visible count, row, and empty state from it.
+- Keep one canonical in-memory list and render every visible row and empty state from it.
 - Persist every successful list mutation locally and restore valid saved data before the first list render.
 - Separate state transitions, browser storage, and presentation so the required behavior can be tested without relying only on screenshots.
 - Make add, rename, delete, pack/unpack, and filter controls unambiguous in a desktop layout and usable by keyboard.
@@ -14,7 +14,7 @@ The approved proposal and packing-list-web-app delta spec define a new desktop-o
 
 **Non-Goals:**
 
-- Accounts, synchronization, server storage, collaboration, or cross-browser data transfer.
+- Accounts, server storage, collaboration, conflict-free concurrent multi-tab editing, or cross-browser data transfer.
 - Mobile-specific layout or interaction design.
 - Reordering, quantities, categories, trip management, or undo history.
 - Persisting transient interface state such as the selected filter, draft input, edit mode, or status messages.
@@ -25,9 +25,14 @@ Use a client-only single-page architecture with one canonical state owner and a 
 
 ## Component Diagram
 
-The page will run entirely in the desktop browser. A single application root owns the current list and selected filter. It delegates persistence to a small storage adapter and supplies derived rows and event handlers to focused UI components.
+The page will run entirely in the desktop browser. A single application root owns the current list and selected filter. It delegates persistence to a small storage adapter and supplies derived rows and event handlers to focused UI components. An immutable static build is delivered by the repository's GitHub Pages deployment; Pages is a delivery boundary, not an application backend.
 
 ~~~text
++---------------- GitHub Pages preview ----------------+
+| Immutable static artifact built from the PR head     |
++--------------------------+----------------------------+
+                           | HTML, CSS, JavaScript
+                           v
 +--------------------------- Desktop browser ----------------------------+
 |                                                                        |
 |  PackingListApp                                                        |
@@ -47,7 +52,7 @@ The page will run entirely in the desktop browser. A single application root own
 +------------------------------------------------------------------------+
 ~~~
 
-There is no network boundary in the event path. The preview is a deployment of the same static client used for review; it does not introduce a backend.
+There is no network boundary after the static assets load. The preview runs the same static client used for review and does not introduce a backend.
 
 This keeps the only required durable boundary—browser storage—explicit and avoids an unnecessary service. A server-backed design was rejected because it would add identity, API, hosting, and failure concerns that do not support the approved single-browser scope. Multiple independent widgets owning their own copies of the list were rejected because rename, filtering, and persistence could diverge.
 
@@ -64,13 +69,13 @@ PackingListDocument {
 }
 
 PackingItem {
-  id: string,       // stable, browser-generated identity
+  id: UUIDv4,       // stable, browser-generated lowercase identity
   name: string,     // trimmed, non-empty display text
   packed: boolean
 }
 ~~~
 
-The runtime adds only selectedFilter ("all" or "to-pack") and a persistence-status value. Neither is written to storage. A new item receives a collision-resistant browser-generated ID, its trimmed submitted name, and packed set to false. Items stay in insertion order. Duplicate names are allowed because identity and updates use id, not display text.
+The runtime adds only selectedFilter ("all" or "to-pack"), a persistence-status value, and, after a failed load, the rejected raw storage value needed for recovery. None is written into the primary document. A new item receives a lowercase RFC 4122 version 4 UUID from `crypto.randomUUID()`, its trimmed submitted name, and packed set to false. Items stay in insertion order. Duplicate names are allowed because identity and updates use id, not display text.
 
 Rename replaces only name; it retains id, packed, and array position. Pack/unpack replaces only packed. Delete removes the item with the matching ID. The All view uses items unchanged, while To pack derives items whose packed value is false. Filtering never mutates or saves the document.
 
@@ -94,20 +99,32 @@ control event -> validate intent -> compute next items -> render next state
               -> serialize full document -> localStorage.setItem()
               -> clear or show persistence status
 
+Save retry:
+warning action -> serialize current canonical document -> localStorage.setItem()
+               -> clear warning on success or keep warning on failure
+
 Filter change:
 filter event -> update selectedFilter -> derive visible items -> render
              -> no storage write
+
+Other-tab write:
+storage event -> parse and validate new document -> replace canonical items
+              -> cancel any row edit -> retain selectedFilter -> render
 ~~~
 
-The full document is replaced after each mutation rather than applying incremental storage operations. localStorage.setItem is synchronous, so one tab observes each mutation as a complete old or new JSON value. The UI does not claim a save succeeded until setItem returns. Keeping the in-memory mutation when a save fails lets the person continue working, while a persistent, non-blocking warning states that the latest changes may be lost on refresh. A later successful mutation writes the whole current document and clears the warning.
+The full document is replaced after each mutation rather than applying incremental storage operations. `localStorage.setItem()` is synchronous, so a tab observes each mutation as a complete old or new JSON value. The UI does not claim a save succeeded until `setItem()` returns. Keeping the in-memory mutation when a save fails lets the person continue working, while a persistent, non-blocking warning states that the latest changes may be lost on refresh. The warning includes a `Retry save` action that writes the whole current document without requiring another list change. Every later mutation also retries by writing the whole document. The warning clears only after a successful write; repeated quota or policy failures leave it visible with guidance to free browser storage or allow site storage before retrying.
 
-Debounced or unload-only saving was rejected because closing or refreshing before the timer or unload handler completes could violate the refresh requirement. Persisting the selected filter was rejected because the durable requirements cover item names and packed states, not view preference; startup therefore always opens All.
+The application listens for `storage` events for `packing-list:v1`. A valid document written by another tab replaces the receiving tab's canonical items, cancels any open rename draft, retains the receiving tab's filter, and announces that the list was updated in another tab. Removal of the key produces the empty list. An invalid external value enters the same blocked recovery state as an invalid startup value. This makes normally sequenced edits converge across tabs and prevents a long-lived stale tab from silently continuing against an old snapshot. Near-simultaneous writes remain last-write-wins because local storage has no compare-and-swap operation; conflict-free concurrent multi-tab editing is explicitly out of scope.
+
+Debounced or unload-only saving was rejected because closing or refreshing before the timer or unload handler completes could violate the refresh requirement. Periodic retry was rejected because it would repeatedly invoke a browser operation that may be denied and would give no clear user control; retry is explicit and also occurs on a later mutation. Persisting the selected filter was rejected because the durable requirements cover item names and packed states, not view preference; startup therefore always opens All.
 
 ### Put all browser persistence behind a versioned adapter
 
-The adapter owns one namespaced key, packing-list:v1. On read it accepts only an object with version 1 and an items array whose entries each have a non-empty string id, a string name that is non-empty and already equals its trimmed value, and a boolean packed value. IDs must also be unique across the array. Unknown top-level fields may be ignored, but a duplicate ID or any malformed entry invalidates the complete document so the app never renders a partially trusted list.
+The adapter owns the primary namespaced key `packing-list:v1` and one recovery key, `packing-list:rejected:v1`. On read it accepts only an object with version 1 and an items array whose entries each have an ID matching the lowercase RFC 4122 version 4 UUID pattern `^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`, a string name that is non-empty and already equals its trimmed value, and a boolean packed value. IDs must also be unique across the array. Unknown top-level fields may be ignored, but a duplicate ID or any malformed entry invalidates the complete document so the app never renders a partially trusted list. Stored IDs are compared as data only; they are not interpolated into HTML, DOM element IDs, or selector strings. Row controls use framework-generated DOM identifiers or direct element references for label and focus relationships.
 
-Missing storage produces an empty list. Invalid JSON, the wrong version, or an invalid shape also produces an empty in-memory list and a warning that saved data could not be loaded. The adapter leaves the unreadable value untouched until a person makes a list mutation; that mutation attempts to replace it with a valid document. Read and write access are wrapped because privacy settings, quota limits, or browser policy can throw even when localStorage exists.
+Missing storage produces an empty list. Invalid JSON, the wrong version, or an invalid shape produces an empty in-memory list and a persistent warning that explains the saved list has not been changed. While this recovery state is active, list mutations are blocked so the rejected value cannot be overwritten accidentally. The warning offers `Download saved data`, which downloads the exact raw value as a text file, and `Reset saved list`. Reset requires confirmation, first copies the exact raw value to `packing-list:rejected:v1`, and then writes a valid empty document to the primary key. If either write fails, the primary rejected value remains untouched and the blocked warning remains. After both writes succeed, mutations are enabled and the warning states that the rejected value was retained under the recovery key. This explicit reset was chosen over silently salvaging individual entries because partial recovery could misassociate names and packed states.
+
+Read and write access are wrapped because privacy settings, quota limits, or browser policy can throw even when local storage exists. If the primary read itself is denied, there is no raw value to download; the app starts with an empty in-memory list, reports that durable storage is unavailable, and allows in-memory mutations with the normal failed-save warning and `Retry save` action.
 
 A version field is retained despite the small model so later schema changes can be detected instead of silently misread. IndexedDB was rejected because the data is small, single-document, and synchronous startup is sufficient. Cookies were rejected because they are size-limited and would be sent to a host without adding value.
 
@@ -115,43 +132,52 @@ A version field is retained despite the small model so later schema changes can 
 
 Each row presents a labeled packed checkbox, the item name, a rename action, and a delete action. Choosing rename changes that row into an edit form initialized with the current name; save commits through the central transition path, while cancel restores the unchanged row. Enter saves a valid edit and Escape cancels it. The packed checkbox remains represented by the canonical packed value after a rename. Item names are always inserted into the DOM as text through textContent or the framework equivalent that escapes text by default; names must never enter innerHTML, raw-HTML directives, or another markup-interpreting sink.
 
-The filter is a two-option control with a programmatically exposed selected state. To pack hides packed rows only; it does not delete or alter them. Distinct empty messages cover an empty list and a To pack result with no remaining items. Buttons and inputs have text labels, focus remains predictable after each action, and packed state is conveyed by the checkbox and text treatment rather than color alone.
+The filter is a two-option control with a programmatically exposed selected state. To pack hides packed rows only; it does not delete or alter them. Distinct empty messages cover an empty list and a To pack result with no remaining items. Buttons and inputs have text labels, and packed state is conveyed by the checkbox and text treatment rather than color alone.
+
+Focus behavior is deterministic. Starting a rename focuses its input; saving or canceling returns focus to that row's rename action. A successful add clears and refocuses the add input. A pack toggle retains focus on its checkbox when the row remains visible. Before delete, or before marking an item packed in the To pack view, the app records the row's visible index. After that row disappears, focus moves to the next visible row's packed checkbox at the same index, then to the previous row's checkbox if there is no next row, and finally to the focusable list heading or empty-state status if no row remains. Because packed rows are absent from To pack, unpacking is available only in All; the review sequence must switch to All before demonstrating unpack.
 
 An always-editable text field per row was considered but rejected because it blurs the difference between an uncommitted draft and a saved rename. Name-based delete or update handlers were rejected because duplicate or renamed items could target the wrong row.
 
 ### Verify behavior at state, persistence, and browser boundaries
 
-State-transition checks will cover default-unpacked add, state-preserving rename, ID-targeted delete, pack/unpack, duplicate names, and the derived filters. Storage checks will cover valid round trips, missing data, malformed JSON, invalid schema or version, duplicate IDs, whitespace-only or untrimmed stored names, and thrown reads or writes. Browser-level checks will perform the approved add, rename, pack, unpack, filter, delete, and refresh scenarios against the rendered page. A safe-rendering check will use a markup-like item name and assert that its literal text appears without creating an element or executing markup.
+State-transition checks will cover default-unpacked add, state-preserving rename, ID-targeted delete, pack/unpack, duplicate names, and the derived filters. Storage checks will cover valid round trips, missing data, malformed JSON, invalid schema or version, invalid or duplicate UUIDs, whitespace-only or untrimmed stored names, rejected-value download and reset, thrown reads or writes, and manual save retry. Multi-tab browser checks will assert that a valid external write replaces stale state and that an invalid external write enters recovery without overwriting the rejected value. Browser-level checks will perform the approved add, rename, pack, unpack, filter, delete, and refresh scenarios against the rendered page, including the defined focus handoff when a row disappears. A safe-rendering check will use a markup-like item name and assert that its literal text appears without creating an element or executing markup.
 
-Browser-level layout checks and every review screenshot will use a 1440 by 900 CSS-pixel viewport as the supported desktop target. Before each screenshot run, open the preview in a dedicated fresh browser context, remove the packing-list:v1 key if present, reload, and verify that the empty-list state appears. The review screenshots will then be captured from that same browser context and deployed preview as an ordered sequence. The sequence will preserve enough stable sample data to show: a newly added item, its renamed form, packed and unpacked rows, the To pack result, a deletion, and the same surviving names and packed states after refresh. Screenshots are evidence of the browser-level flow, not a replacement for automated behavior checks. Before handoff, add the working preview link and the ordered screenshot sequence to the final pull request description, then verify that the link opens the reviewed build and every image renders in sequence.
+Browser-level layout checks and every review screenshot will use a 1440 by 900 CSS-pixel viewport as the supported desktop target. Before each screenshot run, open the preview in a dedicated fresh browser context, remove both storage keys if present, reload, and verify that the empty-list state appears. The review screenshots will then be captured from that same browser context and deployed preview as an ordered sequence. The sequence will preserve enough stable sample data to show: a newly added item, its renamed form, packed and unpacked rows, the To pack result, a deletion, and the same surviving names and packed states after refresh. It must switch back to All before unpacking a packed row. Screenshots are evidence of the browser-level flow, not a replacement for automated behavior checks.
+
+The preview target is GitHub Pages. A GitHub Actions Pages deployment builds the exact pull-request head, uploads its static artifact, and deploys it to the repository's `github-pages` environment using the official Pages upload and deploy actions. The deployment step's `page_url` is the preview URL. Before handoff, put that URL, the deployed commit SHA, and the ordered screenshots in the final pull request description; then verify in a signed-out browser that the URL loads that commit and every image renders in sequence. The preview must remain reachable without repository credentials until human review concludes. Because a repository has one active Pages site, a later deployment may replace it; any replacement before review requires rerunning the behavior check and screenshots against the replacement and updating the recorded SHA.
 
 ## Failure Modes
 
 | Failure | Required handling |
 | --- | --- |
 | Storage key is absent | Start with an empty list and no warning. |
-| Saved JSON is malformed, has an unsupported version, contains duplicate IDs, contains a name that is empty or not already trimmed, or otherwise fails schema validation | Start with an empty list, show a non-blocking load warning, and do not render partial data. |
+| Saved JSON is malformed, has an unsupported version, contains an invalid or duplicate UUID, contains a name that is empty or not already trimmed, or otherwise fails schema validation | Do not render partial data or overwrite the primary value. Enter the blocked recovery state with download and confirmed reset actions. |
 | Browser denies a storage read | Start with an empty in-memory list and warn that saved data is unavailable. |
-| A storage write throws, including quota or policy failures | Keep the current tab state, show that recent changes are not saved, and retry by writing the full current document on the next mutation. |
+| A storage write throws, including quota or policy failures | Keep the current tab state, show that recent changes are not saved, offer `Retry save`, and also retry the full current document on the next mutation. Keep warning after repeated failure. |
+| Another tab writes a valid document | Replace canonical items, cancel an open rename, retain the filter, announce the external update, and render the new document. |
+| Another tab removes or writes an invalid primary value | Show the empty list for removal; for invalid data, enter blocked recovery and preserve the rejected raw value. |
 | Add or rename is blank after trimming | Keep the form open, do not mutate or write, and associate a validation message with the input. |
 | An item name contains markup-like text | Render it as literal text through an escaping text sink; never interpret it as DOM markup. |
 | An event references an ID no longer in the current list | Treat it as a no-op and do not write, avoiding mutation of a different row. |
+| A delete or To pack toggle removes the focused row | Move focus to the next row, previous row, or focusable list status in that order. |
 | To pack has no matching items | Render its dedicated “nothing left to pack” state while preserving all packed items in canonical state. |
-| Preview deployment is unavailable | The review cannot be considered complete; fix or replace the preview before collecting the final screenshot sequence. |
+| GitHub Pages deployment fails, requires credentials, serves a different commit, or is replaced before review | The review is not ready. Repair and redeploy the PR head, then verify the URL and repeat the screenshot sequence before handoff. |
 
 ## Risks / Trade-offs
 
 - [Browser-local data can be cleared and does not follow the person to another browser or device] → Keep the product copy scoped to this browser and avoid implying account-backed durability.
-- [A corrupt saved document falls back to an empty screen] → Validate before render, warn clearly, retain the bad value until the next deliberate mutation, and test malformed inputs.
-- [A write failure means visible state and refreshed state can differ] → Surface save status immediately and retry the full canonical document on every later mutation.
+- [A corrupt saved document cannot be safely rendered] → Block mutations, preserve and offer the raw value for download, and require a confirmed backup-and-reset flow before replacement.
+- [A write failure means visible state and refreshed state can differ] → Surface save status immediately, provide manual retry, and retry the full canonical document on every later mutation.
+- [Near-simultaneous edits in two tabs can overwrite each other] → Converge normally sequenced writes through storage events, announce external changes, and state the remaining last-write-wins boundary explicitly.
 - [Synchronous storage performs work on the UI thread] → Store only the small packing-list document and serialize once per deliberate list mutation; revisit the storage choice only if the scope grows substantially.
 - [Duplicate names can look ambiguous] → Keep stable hidden IDs for targeting and ensure row controls are associated with the visible row; do not silently impose a uniqueness rule.
 - [Desktop-only design may be awkward outside the review target] → Run layout checks and screenshots at the defined 1440 by 900 CSS-pixel viewport; do not add unapproved mobile behavior.
 
 ## Migration Plan
 
-1. Ship the client with the namespaced packing-list:v1 key and no seed data. A first visit therefore starts empty.
-2. Run state, storage, and browser behavior checks at the 1440 by 900 CSS-pixel desktop viewport, including a real reload after mutations.
-3. Deploy the static client to the review preview. Start a dedicated fresh browser context, remove packing-list:v1 if present, reload to verify the empty state, and then execute the screenshot sequence there.
-4. Add the working preview link and ordered screenshots to the final pull request description; verify the link and images before requesting human review.
-5. Roll back by restoring the previous static deployment. Rollback does not need a data migration and should leave packing-list:v1 untouched, so a corrected release can recover the valid list later.
+1. Ship the client with the `packing-list:v1` primary key and `packing-list:rejected:v1` recovery key, with no seed data. A first visit therefore starts empty.
+2. Run state, storage, multi-tab, focus, and browser behavior checks at the 1440 by 900 CSS-pixel desktop viewport, including a real reload after mutations.
+3. Build the pull-request head and deploy that immutable static artifact through GitHub Actions to the repository's GitHub Pages `github-pages` environment.
+4. In a dedicated fresh browser context, remove both packing-list keys, reload the Pages URL to verify the empty state, and execute the screenshot sequence there. Verify the deployed SHA and signed-out availability.
+5. Add the Pages URL, deployed SHA, and ordered screenshots to the final pull request description. Keep that deployment available until human review concludes.
+6. Roll back the application by redeploying the previous known-good Pages artifact. Rollback leaves both storage keys untouched so a corrected release can recover the valid list or rejected raw value later.
