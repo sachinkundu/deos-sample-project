@@ -1,6 +1,6 @@
 ## Context
 
-The approved proposal and packing-list-web-app delta spec define a new desktop-only packing-list page. The change has no server API or shared-data requirement; item names and packed state remain in one browser profile across refreshes. The implementation must also support a repeatable live-preview and screenshot review sequence. No repository guidance was included in the checked context.
+The approved proposal and packing-list-web-app delta spec define a new desktop-only packing-list page. The change has no server API or shared-data requirement; item names and packed state remain in one browser profile across refreshes. The implementation must also support a repeatable hosted-preview and screenshot review sequence. No repository guidance was included in the checked context.
 
 ## Goals / Non-Goals
 
@@ -25,12 +25,14 @@ Use a client-only single-page architecture with one canonical state owner and a 
 
 ## Component Diagram
 
-The page will run entirely in the desktop browser. A single application root owns the current list and selected filter. It delegates persistence to a small storage adapter and supplies derived rows and event handlers to focused UI components. An immutable static build is delivered by the repository's GitHub Pages deployment; Pages is a delivery boundary, not an application backend.
+The page will run entirely in the desktop browser. A single application root owns the current list and selected filter. It delegates persistence to a small storage adapter and supplies derived rows and event handlers to focused UI components. After implementation builds the finished static client, the DEOS `static-preview-v1` capability is the delivery boundary: the implementation agent passes the build directory to `publish_preview`, and the trusted service publishes a run-owned, nonproduction Cloudflare Pages deployment with an immutable review URL.
 
 ~~~text
-+---------------- GitHub Pages preview ----------------+
-| Immutable static artifact built from the PR head     |
-+--------------------------+----------------------------+
++---------------- DEOS static-preview-v1 ----------------+
+| publish_preview(finished static build directory)       |
+|     -> trusted service                                  |
+|     -> immutable, run-owned Cloudflare Pages URL       |
++--------------------------+-----------------------------+
                            | HTML, CSS, JavaScript
                            v
 +--------------------------- Desktop browser ----------------------------+
@@ -52,7 +54,7 @@ The page will run entirely in the desktop browser. A single application root own
 +------------------------------------------------------------------------+
 ~~~
 
-There is no network boundary after the static assets load. The preview runs the same static client used for review and does not introduce a backend.
+There is no network boundary after the static assets load. The preview runs the same static client used for review and does not introduce an application backend. It requires no GitHub Actions workflow, repository Pages setup, agent-held provider credentials, or production release.
 
 This keeps the only required durable boundary—browser storage—explicit and avoids an unnecessary service. A server-backed design was rejected because it would add identity, API, hosting, and failure concerns that do not support the approved single-browser scope. Multiple independent widgets owning their own copies of the list were rejected because rename, filtering, and persistence could diverge.
 
@@ -134,7 +136,7 @@ Each row presents a labeled packed checkbox, the item name, a rename action, and
 
 The filter is a two-option control with a programmatically exposed selected state. To pack hides packed rows only; it does not delete or alter them. Distinct empty messages cover an empty list and a To pack result with no remaining items. Buttons and inputs have text labels, and packed state is conveyed by the checkbox and text treatment rather than color alone.
 
-Focus behavior is deterministic. Starting a rename focuses its input; saving or canceling returns focus to that row's rename action. A successful add clears and refocuses the add input. A pack toggle retains focus on its checkbox when the row remains visible. Before delete, or before marking an item packed in the To pack view, the app records the row's visible index. After that row disappears, focus moves to the next visible row's packed checkbox at the same index, then to the previous row's checkbox if there is no next row, and finally to the focusable list heading or empty-state status if no row remains. Because packed rows are absent from To pack, unpacking is available only in All; the review sequence must switch to All before demonstrating unpack.
+Focus behavior is deterministic. Starting a rename focuses its input; saving or canceling returns focus to that row's rename action. A successful add clears and refocuses the add input. A pack toggle retains focus on its checkbox when the row remains visible. Before delete, or before marking an item packed in the To pack view, the app records the row's visible index. After that row disappears, focus moves to the next visible row's packed checkbox at the same index, then to the previous row's checkbox if there is no next row, and finally to the focusable list heading or empty-state status if no row remains. Because packed rows are absent from To pack, unpacking is available only in All; browser checks must switch to All before demonstrating unpack.
 
 An always-editable text field per row was considered but rejected because it blurs the difference between an uncommitted draft and a saved rename. Name-based delete or update handlers were rejected because duplicate or renamed items could target the wrong row.
 
@@ -142,9 +144,9 @@ An always-editable text field per row was considered but rejected because it blu
 
 State-transition checks will cover default-unpacked add, state-preserving rename, ID-targeted delete, pack/unpack, duplicate names, and the derived filters. Storage checks will cover valid round trips, missing data, malformed JSON, invalid schema or version, invalid or duplicate UUIDs, whitespace-only or untrimmed stored names, rejected-value download and reset, thrown reads or writes, and manual save retry. Multi-tab browser checks will assert that a valid external write replaces stale state and that an invalid external write enters recovery without overwriting the rejected value. Browser-level checks will perform the approved add, rename, pack, unpack, filter, delete, and refresh scenarios against the rendered page, including the defined focus handoff when a row disappears. A safe-rendering check will use a markup-like item name and assert that its literal text appears without creating an element or executing markup.
 
-Browser-level layout checks and every review screenshot will use a 1440 by 900 CSS-pixel viewport as the supported desktop target. Before each screenshot run, open the preview in a dedicated fresh browser context, remove both storage keys if present, reload, and verify that the empty-list state appears. The review screenshots will then be captured from that same browser context and deployed preview as an ordered sequence. The sequence will preserve enough stable sample data to show: a newly added item, its renamed form, packed and unpacked rows, the To pack result, a deletion, and the same surviving names and packed states after refresh. It must switch back to All before unpacking a packed row. Screenshots are evidence of the browser-level flow, not a replacement for automated behavior checks.
+Browser-level layout checks and every review screenshot will use a 1440 by 900 CSS-pixel viewport as the supported desktop target. The implementation agent chooses the useful behavior-demonstration scenarios and screenshot count, provided the ordered evidence collectively shows a new item after add, a changed name, both packed states, the To pack view, an item gone after delete, and the same saved names and packed states after refresh. Each independent scenario starts in a dedicated fresh browser context with both storage keys removed, reloads the hosted preview, verifies the empty-list state, performs its behavior steps, and captures the result before that context is reset for the next scenario. Screenshots are evidence of real browser behavior, not a replacement for automated checks; platform or infrastructure demonstration scenarios are excluded.
 
-The preview target is GitHub Pages. A GitHub Actions Pages deployment builds the exact pull-request head, uploads its static artifact, and deploys it to the repository's `github-pages` environment using the official Pages upload and deploy actions. The deployment step's `page_url` is the preview URL. Before handoff, put that URL, the deployed commit SHA, and the ordered screenshots in the final pull request description; then verify in a signed-out browser that the URL loads that commit and every image renders in sequence. The preview must remain reachable without repository credentials until human review concludes. Because a repository has one active Pages site, a later deployment may replace it; any replacement before review requires rerunning the behavior check and screenshots against the replacement and updating the recorded SHA.
+After the static build and behavior checks pass, the implementation agent calls the DEOS `publish_preview` capability with the finished static build directory. The trusted service publishes the directory through `static-preview-v1` as a run-owned, nonproduction Cloudflare Pages deployment and returns an immutable review URL. The agent then runs the selected screenshot scenarios against that URL, verifies it in a fresh browser without repository credentials, and adds the URL and ordered screenshots to the implementation pull request. The published preview is review evidence only; no GitHub Actions workflow, GitHub Pages configuration, provider credential, or production release belongs in the repository.
 
 ## Failure Modes
 
@@ -153,7 +155,7 @@ The preview target is GitHub Pages. A GitHub Actions Pages deployment builds the
 | Storage key is absent | Start with an empty list and no warning. |
 | Saved JSON is malformed, has an unsupported version, contains an invalid or duplicate UUID, contains a name that is empty or not already trimmed, or otherwise fails schema validation | Do not render partial data or overwrite the primary value. Enter the blocked recovery state with download and confirmed reset actions. |
 | Browser denies a storage read | Start with an empty in-memory list and warn that saved data is unavailable. |
-| A storage write throws, including quota or policy failures | Keep the current tab state, show that recent changes are not saved, offer `Retry save`, and also retry the full current document on the next mutation. Keep warning after repeated failure. |
+| A storage write throws, including quota or policy failures | Keep the current tab state, show that recent changes are not saved, offer `Retry save`, and also retry the full current document on the next mutation. Keep the warning after repeated failure. |
 | Another tab writes a valid document | Replace canonical items, cancel an open rename, retain the filter, announce the external update, and render the new document. |
 | Another tab removes or writes an invalid primary value | Show the empty list for removal; for invalid data, enter blocked recovery and preserve the rejected raw value. |
 | Add or rename is blank after trimming | Keep the form open, do not mutate or write, and associate a validation message with the input. |
@@ -161,7 +163,7 @@ The preview target is GitHub Pages. A GitHub Actions Pages deployment builds the
 | An event references an ID no longer in the current list | Treat it as a no-op and do not write, avoiding mutation of a different row. |
 | A delete or To pack toggle removes the focused row | Move focus to the next row, previous row, or focusable list status in that order. |
 | To pack has no matching items | Render its dedicated “nothing left to pack” state while preserving all packed items in canonical state. |
-| GitHub Pages deployment fails, requires credentials, serves a different commit, or is replaced before review | The review is not ready. Repair and redeploy the PR head, then verify the URL and repeat the screenshot sequence before handoff. |
+| `publish_preview` rejects the build directory, the trusted publication fails, the returned URL does not load the reviewed build, or the URL is not accessible for review | The review is not ready. Correct the static build or publication input, call `publish_preview` again, then rerun the selected behavior scenarios and screenshots against the new immutable URL before handoff. Do not substitute a repository workflow, agent credentials, or a production deployment. |
 
 ## Risks / Trade-offs
 
@@ -177,7 +179,7 @@ The preview target is GitHub Pages. A GitHub Actions Pages deployment builds the
 
 1. Ship the client with the `packing-list:v1` primary key and `packing-list:rejected:v1` recovery key, with no seed data. A first visit therefore starts empty.
 2. Run state, storage, multi-tab, focus, and browser behavior checks at the 1440 by 900 CSS-pixel desktop viewport, including a real reload after mutations.
-3. Build the pull-request head and deploy that immutable static artifact through GitHub Actions to the repository's GitHub Pages `github-pages` environment.
-4. In a dedicated fresh browser context, remove both packing-list keys, reload the Pages URL to verify the empty state, and execute the screenshot sequence there. Verify the deployed SHA and signed-out availability.
-5. Add the Pages URL, deployed SHA, and ordered screenshots to the final pull request description. Keep that deployment available until human review concludes.
-6. Roll back the application by redeploying the previous known-good Pages artifact. Rollback leaves both storage keys untouched so a corrected release can recover the valid list or rejected raw value later.
+3. Build the exact implementation pull-request head as a finished static directory and call `publish_preview` with that directory. The trusted DEOS service publishes it through `static-preview-v1` and returns the immutable, run-owned nonproduction Cloudflare Pages URL.
+4. Choose a useful set and count of behavior-demonstration scenarios. For each scenario, start from a dedicated clean browser context with both storage keys removed, run it against the hosted preview, and capture its result before resetting for the next scenario. Collectively cover every screenshot behavior required by the delta spec; do not add platform or infrastructure scenarios.
+5. Verify the immutable URL without repository credentials, then add it and the ordered real-app screenshots to the implementation pull request for human review.
+6. If the build or hosted result is wrong, correct the client, produce a new static build, and call `publish_preview` again; update the pull request to the new immutable URL and recapture affected screenshots. No production rollback is needed because the deployment is nonproduction and run-owned. Existing browser storage remains untouched so the corrected build can recover a valid list or rejected raw value.
