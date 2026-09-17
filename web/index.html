@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light">
+    <title>Daily Expenses</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body data-harness="none">
+    <!-- REVIEW_HARNESS -->
+    <main class="app-shell">
+      <header class="app-header">
+        <div>
+          <p class="eyebrow">Personal ledger</p>
+          <h1>Daily expenses</h1>
+          <p class="subtitle">A clear view of what you spend, saved in this browser.</p>
+        </div>
+        <div class="currency-chip" aria-label="Currency: Euro">
+          <span>€</span>
+          <div><strong>Euro</strong><small>Local to this browser</small></div>
+        </div>
+      </header>
+
+      <div class="app-grid">
+        <aside class="panel add-panel" aria-labelledby="add-heading">
+          <div class="panel-heading">
+            <span class="step">01</span>
+            <div>
+              <h2 id="add-heading">Add an expense</h2>
+              <p>Record a cost in a few seconds.</p>
+            </div>
+          </div>
+
+          <form id="expense-form" novalidate>
+            <fieldset id="add-fields">
+              <div class="field">
+                <label for="expense-name">Expense name</label>
+                <input id="expense-name" name="name" type="text" autocomplete="off" placeholder="e.g. Lunch" aria-describedby="name-error">
+                <p class="field-error" id="name-error"></p>
+              </div>
+              <div class="field">
+                <label for="expense-amount">Amount <span>EUR</span></label>
+                <div class="amount-field">
+                  <span aria-hidden="true">€</span>
+                  <input id="expense-amount" name="amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00" aria-describedby="amount-error">
+                </div>
+                <p class="field-error" id="amount-error"></p>
+              </div>
+              <div class="field">
+                <label for="expense-category">Category</label>
+                <select id="expense-category" name="category" aria-describedby="category-error">
+                  <option value="Food">Food</option>
+                  <option value="Travel">Travel</option>
+                  <option value="Bills">Bills</option>
+                  <option value="Other">Other</option>
+                </select>
+                <p class="field-error" id="category-error"></p>
+              </div>
+              <button class="primary-button" type="submit">
+                <span aria-hidden="true">+</span> Add expense
+              </button>
+            </fieldset>
+          </form>
+
+          <div class="privacy-note">
+            <span aria-hidden="true">●</span>
+            <p><strong>Private by default</strong>Your expenses stay in this browser.</p>
+          </div>
+        </aside>
+
+        <section class="panel ledger-panel" aria-labelledby="ledger-heading">
+          <div class="ledger-topline">
+            <div>
+              <p class="eyebrow">Your ledger</p>
+              <h2 id="ledger-heading">Recent expenses</h2>
+            </div>
+            <div class="total-card">
+              <span>Visible total</span>
+              <strong id="visible-total">€0.00</strong>
+            </div>
+          </div>
+
+          <div id="status-message" class="status-message" role="status" aria-live="polite" hidden></div>
+
+          <section id="recovery-panel" class="recovery-panel" aria-labelledby="recovery-heading" hidden>
+            <div>
+              <p class="eyebrow">Storage needs attention</p>
+              <h3 id="recovery-heading">Saved data could not be loaded</h3>
+              <p id="recovery-message"></p>
+            </div>
+            <div class="recovery-actions">
+              <button id="clear-storage" class="secondary-button" type="button">Clear saved data</button>
+              <button id="retry-storage" class="secondary-button" type="button">Retry access</button>
+              <div id="clear-confirmation" class="clear-confirmation" hidden>
+                <p>This permanently removes the unreadable saved value from this browser.</p>
+                <button id="confirm-clear-storage" class="danger-button" type="button">Yes, clear saved data</button>
+                <button id="cancel-clear-storage" class="text-button" type="button">Cancel</button>
+              </div>
+            </div>
+          </section>
+
+          <nav class="filters" aria-label="Filter expenses by category">
+            <span>Show</span>
+            <div id="filter-buttons" class="filter-buttons">
+              <button type="button" data-filter="All" aria-pressed="true">All</button>
+              <button type="button" data-filter="Food" aria-pressed="false">Food</button>
+              <button type="button" data-filter="Travel" aria-pressed="false">Travel</button>
+              <button type="button" data-filter="Bills" aria-pressed="false">Bills</button>
+              <button type="button" data-filter="Other" aria-pressed="false">Other</button>
+            </div>
+          </nav>
+
+          <div class="list-labels" aria-hidden="true">
+            <span>Expense</span><span>Category</span><span>Amount</span><span>Actions</span>
+          </div>
+          <ul id="expense-list" class="expense-list"></ul>
+          <div id="empty-state" class="empty-state" tabindex="-1">
+            <div aria-hidden="true">€</div>
+            <h3>No expenses here yet</h3>
+            <p>Add your first expense, or choose another category.</p>
+          </div>
+        </section>
+      </div>
+    </main>
+    <script src="./review-harness.js"></script>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
