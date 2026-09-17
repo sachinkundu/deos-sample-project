@@ -1,6 +1,6 @@
 ## Context
 
-The approved proposal and `expense-tracker-web-app` delta spec define a new, single-screen desktop app. The app has no server or account boundary: its only durable state is an expense document in the current browser. The completed static build must also support repeatable browser demonstrations and publication through the declared `static-preview-v1` path. No repository guidance, prior design, or design-review feedback was included in the checked context.
+The approved proposal and `expense-tracker-web-app` delta spec define a new, single-screen desktop app. The app has no server or account boundary: its only durable state is an expense document in the current browser. The completed static build must also support repeatable browser demonstrations and publication through the declared `static-preview-v1` path. No repository guidance beyond the approved plan was declared in the checked context.
 
 ## Goals / Non-Goals
 
@@ -10,23 +10,24 @@ The approved proposal and `expense-tracker-web-app` delta spec define a new, sin
 - Represent euro values exactly, without binary floating-point arithmetic.
 - Validate add and edit submissions before either application state or browser storage changes.
 - Restore valid saved expenses before the first normal render and persist every successful mutation as one document.
+- Avoid silently overwriting changes made by another open app tab when they are detected before a mutation.
 - Make storage and validation failures explicit enough that a person knows whether an operation was accepted.
 - Produce a static client that can be exercised at a fixed desktop viewport and published without a backend.
 
 **Non-Goals:**
 
-- Accounts, synchronization, collaboration, import/export, analytics, or any outside service.
+- Accounts, server synchronization, collaboration, import/export, analytics, or any outside service.
 - A server API, database, production release, repository-hosting workflow, or provider credentials in the repository.
 - Mobile-specific layout, recurring expenses, budgets, custom categories, sorting, pagination, or currency conversion.
 - Persisting transient UI state such as the selected filter, open editor, draft fields, or messages.
 
 ## Decisions
 
-## Component Diagram
-
 ### Use a client-only single-page architecture
 
 The implementation will be a browser-native static page with a single application state owner. UI regions send semantic events to that owner; they do not mutate storage or keep independent expense copies. A storage adapter is the only code that accesses `localStorage`. The finished static directory is the input to the trusted `static-preview-v1` publisher.
+
+#### Component diagram
 
 ```text
 +---------------------- static-preview-v1 ----------------------+
@@ -36,7 +37,7 @@ The implementation will be a browser-native static page with a single applicatio
                                 v
 +-------------------------- Desktop browser ----------------------------+
 | ExpenseTrackerApp                                                   |
-| (expenses, selected filter, editor state, message state)            |
+| (expenses, storage snapshot, selected filter, editor, messages)     |
 |                                                                      |
 |  ExpenseForm   CategoryFilters   ExpenseList -> ExpenseRow           |
 |         \             |               /                              |
@@ -47,6 +48,8 @@ The implementation will be a browser-native static page with a single applicatio
 |                       |                                              |
 |                       v                                              |
 |              ExpenseStorageAdapter <-> localStorage                 |
+|                       ^                    |                          |
+|                       +---- storage event -+                          |
 |                       |                                              |
 |                       +-> derived visible rows and total -> Summary  |
 +----------------------------------------------------------------------+
@@ -54,9 +57,9 @@ The implementation will be a browser-native static page with a single applicatio
 
 There is no application network request after the assets load. Keeping a single state owner ensures that rows, filters, totals, and the saved document all describe the same collection. A server-backed design was rejected because it adds hosting, identity, and network failure modes outside the approved scope. Separate state in each UI region was rejected because edits and totals could diverge. A client framework is not required for this state size; browser-native modules and semantic HTML keep the static artifact small and avoid an unnecessary runtime dependency.
 
-## Minimal Data Model
-
 ### Store a versioned document with exact euro amounts
+
+#### Minimal data model
 
 The primary storage key will be `expense-tracker:v1`. Its complete value has this shape:
 
@@ -74,7 +77,9 @@ Expense {
 }
 ```
 
-The amount is stored as a cents string rather than a JavaScript number. Submission parsing accepts only a trimmed positive decimal form with digits before the decimal point and zero, one, or two digits after it (`12`, `12.5`, and `12.50` are valid forms). Validation first rejects blank input, then recognizes a well-formed numeric value with a leading minus as an amount that is not more than zero, rejects other malformed syntax as nonnumeric, rejects a numeric fractional part longer than two digits, and finally rejects a zero result. Parsing removes the decimal point, pads one fractional digit, and removes leading zeroes. For example, `12.50` becomes `"1250"`. This permits exact addition with `BigInt` and does not add an unstated maximum amount. Display formatting pads cents to at least three digits, inserts the decimal point before the final two digits, and prefixes `€`, producing deterministic values such as `€0.00` and `€12.50`.
+The amount is stored as a cents string rather than a JavaScript number. Submission parsing accepts only a trimmed positive decimal form with digits before the optional decimal point and zero, one, or two digits after it (`12`, `12.5`, and `12.50` are valid forms). Validation first rejects blank input, then recognizes a well-formed numeric value with a leading minus as an amount that is not more than zero, rejects other malformed syntax as nonnumeric, rejects a numeric fractional part longer than two digits, and finally rejects a zero result.
+
+Canonicalization splits the accepted input at the optional decimal point, uses an empty fractional part when no point is present, right-pads that fractional part to exactly two digits, concatenates the whole and fractional parts, and strips leading zeroes. The all-zero result is rejected rather than stored. Thus `12` becomes `"1200"`, `12.5` becomes `"1250"`, `12.50` becomes `"1250"`, and `0.05` becomes `"5"`. This permits exact addition with `BigInt` and does not add an unstated maximum amount. Display formatting pads cents to at least three digits, inserts the decimal point before the final two digits, and prefixes `€`, producing deterministic values such as `€0.00`, `€0.05`, and `€12.50`.
 
 Each successful add creates a UUID and appends the expense. Edit preserves `id` and array position while replacing all three editable fields. Delete removes only the matching ID. IDs, not names or row positions, target edit and delete operations. Duplicate names therefore remain safe. If UUID generation fails, add remains rejected and a visible error explains that the expense could not be created.
 
@@ -82,7 +87,7 @@ The adapter accepts a stored document only when `version` is exactly `1`, `expen
 
 Using decimal JavaScript numbers was rejected because values such as `0.1 + 0.2` are not exact and can produce incorrect totals. Storing formatted euro text was rejected because formatting and arithmetic would become coupled. One storage key per expense was rejected because a multi-key mutation can leave a partially updated list.
 
-### Validate once, then persist before committing a mutation
+### Validate once and persist before committing a mutation
 
 Add and edit use the same validation function and field-specific messages. It trims the name and requires it to remain non-empty, parses the amount under the exact rules above, and verifies the category against the fixed allowlist even though the normal UI uses a select control. A failed edit leaves the saved expense unchanged; a failed add creates no expense. The form remains open, preserves the submitted values, associates the first error with its field, and moves focus to that field. A later successful submission clears the errors.
 
@@ -90,15 +95,23 @@ For a valid mutation, the app constructs a candidate complete document and asks 
 
 Optimistic UI with a later save was rejected because a page refresh after a failed write could silently undo a change that looked accepted. Debounced or unload-only persistence was rejected because refresh can happen before the delayed write.
 
-### Derive filters and totals; do not persist them
+### Detect same-browser tab changes before writing
 
-Runtime filter state is one of `All`, `Food`, `Travel`, `Bills`, or `Other` and defaults to `All` on every startup. The visible list is the canonical expense array when `All` is selected, or the items whose category equals the selected category otherwise. The summary folds `amountCents` from that visible list with `BigInt`, starting at zero, and formats the result with the same euro formatter used by rows. It is recalculated after every committed mutation and filter event. After a successful add or edit, the app retains the selected filter if the new values match it; otherwise it selects `All` so the newly added or edited expense appears as required. An empty result therefore renders an empty-state message and `€0.00` without a special persisted total.
+The state owner retains the exact serialized storage snapshot from its last successful read or write. Immediately before every add, edit, or delete write, the adapter reads and validates the current stored document again and compares its serialization with that snapshot. If the values differ, the app does not write its stale candidate. It adopts the newly read valid document, re-renders rows and the visible total, preserves an add or edit draft, and announces that expenses changed in another tab and the person must review and retry. An edit or delete whose target ID disappeared is rejected as no longer available. This preflight makes an already-saved mutation from another tab visible instead of silently replacing it.
 
-Persisting the selected filter was rejected because it is a view preference, not expense data. Persisting totals was rejected because they are derived and could become stale.
+The app also listens for `storage` events for the primary key. A valid external value becomes the new canonical document and snapshot and is announced. An external invalid or unreadable value enters the same blocked recovery state as an invalid startup value. Drafts are not written automatically; their next submission runs validation and the preflight again. The event listener improves promptness, while the mandatory pre-write read remains the correctness boundary when an event is delayed.
+
+No backend or account-level synchronization is introduced. Two tabs can still begin preflight at nearly the same instant because `localStorage` has no compare-and-swap transaction; that narrow race is documented under Risks / Trade-offs. Silently accepting general last-write-wins behavior was rejected because ordinary sequential tab use could bring back a deletion or discard a saved expense.
+
+### Derive filters and totals and make visibility changes explicit
+
+Runtime filter state is one of `All`, `Food`, `Travel`, `Bills`, or `Other` and defaults to `All` on every startup. The visible list is the canonical expense array when `All` is selected, or the items whose category equals the selected category otherwise. The summary folds `amountCents` from that visible list with `BigInt`, starting at zero, and formats the result with the same euro formatter used by rows. It is recalculated after every committed mutation, external storage update, and filter event. An empty result therefore renders an empty-state message and `€0.00` without a special persisted total.
+
+After a successful add, the app retains `All` or a selected category that matches the new expense. If the active category does not match, it selects `All`, announces that the filter changed so the new expense is visible, and renders the new all-expense total. This is necessary to satisfy the approved requirement that a valid added expense appears in the list, while avoiding a silent override of the person's filter choice. After a successful edit, the same rule applies when changing the expense's category would otherwise hide the saved replacement: the app selects `All`, announces why, and renders the all-expense total. An edit that continues to match the active filter retains it. Delete never changes the selected filter.
+
+Keeping a mismatched filter and merely announcing a hidden add was rejected because the approved add requirement says the valid expense appears in the list. Resetting every successful mutation to `All` was rejected because it would discard a matching filter without a visibility reason. Persisting the selected filter was rejected because it is a view preference, not expense data. Persisting totals was rejected because they are derived and could become stale.
 
 ## Event Flow
-
-### Use explicit event flows for startup and interaction
 
 Startup follows one ordered path:
 
@@ -110,17 +123,29 @@ page load -> adapter read -> missing / valid / invalid / read failure
   failure -> do not write -> blocked storage-access message
 ```
 
-Mutation and filter events follow these paths:
+Mutation, external-storage, and filter events follow these paths:
 
 ```text
 add or save edit
-  -> collect draft -> validate -> build candidate document
-  -> write complete document -> commit canonical state
-  -> retain matching filter or select All -> derive -> render
+  -> collect draft -> validate -> build intended mutation
+  -> preflight read and compare with last snapshot
+     unchanged -> build and write complete candidate document
+               -> commit canonical state and new snapshot
+               -> retain matching filter or announce switch to All
+               -> derive -> render
+     changed   -> adopt latest valid document -> preserve draft
+               -> announce conflict -> require review and retry
 
 delete(id)
-  -> find exact id -> build candidate without it
-  -> write complete document -> commit canonical state -> derive -> render
+  -> preflight read and compare with last snapshot
+     unchanged -> build candidate without id -> write complete document
+               -> commit state and snapshot -> derive -> render
+     changed   -> adopt latest valid document -> announce conflict
+               -> require a new delete action
+
+storage event for expense-tracker:v1
+  -> validate latest value -> adopt state and snapshot -> derive -> render
+  -> or enter blocked recovery state when the latest value is invalid
 
 select filter
   -> update transient filter -> derive visible rows and total -> render
@@ -131,19 +156,23 @@ refresh
 
 An invalid saved value is never overwritten automatically. The page shows that saved data could not be loaded, disables expense mutations, and offers a confirmed `Clear saved data` action. Confirmation removes the invalid primary value; only successful removal returns the app to the normal empty state. If reading storage itself throws, the page likewise disables mutations and offers `Retry storage access`; it cannot safely assume the key is empty. These recovery controls are intentionally small and keep a malformed or unreadable value from being silently destroyed.
 
-### Keep desktop interactions unambiguous and accessible
+### Desktop interaction behavior
 
-The one screen contains an add form, a clearly labeled five-option filter control, a total, and the expense list. Every row displays name, formatted amount, category, and labeled Edit and Delete actions. Only one row enters edit mode at a time; its fields are initialized from canonical data. Save follows the shared validation and persistence flow, while Cancel discards only the draft. The selected filter exposes selected state in semantics as well as styling. Status and validation messages use an announced status region, and labels are programmatically associated with controls.
+The one screen contains an add form, a clearly labeled five-option filter control, a total, and the expense list. Every row displays name, formatted amount, category, and labeled Edit and Delete actions. Only one row enters edit mode at a time; its fields are initialized from canonical data. Save follows the shared validation, preflight, and persistence flow, while Cancel discards only the draft. The selected filter exposes selected state in semantics as well as styling. Status and validation messages use an announced status region, and labels are programmatically associated with controls.
 
 After a successful add, focus returns to the cleared name field. Opening edit focuses the edit name field. Cancel or a successful edit returns focus to that row's Edit action. After successful delete, focus moves to the next row's Edit action, then the previous row's action, then the focusable empty-list heading if no row remains. Rendering inserts expense names as text, never as HTML.
 
 Inline editing was chosen over a second page or modal so all behavior stays on the approved single desktop screen. Name-based handlers were rejected because duplicate or renamed expenses could target the wrong record.
 
-### Verify the domain, storage boundary, and real preview
+### Verification and preview flow
 
-Automated checks will cover amount parsing and formatting, every validation branch, exact totals, all five filters, add/edit/delete transitions, ID targeting, and rejected mutations that preserve prior state. Storage checks will cover missing and valid documents, refresh-equivalent reload, malformed JSON, unsupported versions, malformed entries, duplicate IDs, and thrown reads and writes. Rendered-browser checks will exercise keyboard-visible add and edit errors, selected-filter state, empty filtered totals, focus after deletion, literal rendering of markup-like names, and restoration after an actual reload.
+Automated checks will cover amount parsing and formatting, including `12` -> `"1200"`, `12.5` -> `"1250"`, and `0.05` -> `"5"`; every validation branch; exact totals; all five filters; add/edit/delete transitions; ID targeting; and rejected mutations that preserve prior state. Filter-transition checks will cover an add outside the selected category and an edit moved out of the selected category, asserting the announced change to `All`, the visible saved row, and the resulting all-expense total. They will also prove that matching add/edit operations and deletes retain the active filter.
 
-The implementation will use a 1440 by 900 CSS-pixel viewport as the desktop review target. Demonstrations use the finished app and fixed harness. Each independent scenario starts with a fresh browser context and known local-storage data, and each observed result is captured before the next scenario resets. The ordered evidence must collectively show add, edit, delete, a rejected invalid entry with a clear message, a selected category containing only matching rows with the correct visible total, and the same saved data immediately before and after refresh. It must include a dedicated invalid-category scenario: the fixed browser harness adds and selects an unsupported `Entertainment` option in the category control, submits through the rendered form, and captures the unsupported selection, the clear allowlist error, and the unchanged list and total in the observed result.
+Storage checks will cover missing and valid documents, refresh-equivalent reload, malformed JSON, unsupported versions, malformed entries, duplicate IDs, thrown reads and writes, a preflight value changed by another tab, a missing edit/delete target after an external change, and valid and invalid `storage` events. Rendered-browser checks will exercise keyboard-visible add and edit errors, selected-filter state, empty filtered totals, focus after deletion, literal rendering of markup-like names, restoration after an actual reload, and conflict messaging that preserves an unsaved draft. The category validation suite must directly submit a category outside the allowlist through the application submission boundary; it must assert the allowlist message and unchanged canonical and stored documents without relying on DOM injection.
+
+The implementation will use a 1440 by 900 CSS-pixel viewport as the desktop review target. Demonstrations use the finished app and one fixed harness. Each independent scenario starts with a fresh browser context and known local-storage data, and each observed result is captured before the next scenario resets. The ordered evidence must collectively show add, edit, delete, a rejected invalid entry with a clear message, a selected category containing only matching rows with the correct visible total, and the same saved data immediately before and after refresh.
+
+The evidence also includes a dedicated invalid-category scenario. The fixed harness performs a predeclared runtime probe that injects and selects an unsupported `Entertainment` option in the rendered category control, then submits the normal rendered form. The published static build and application files remain unmodified. The captured evidence must be labeled `Harness-forced allowlist probe` and state that `Entertainment` was injected by the browser harness rather than shipped as an application option. It must show the unsupported selection, the clear allowlist error, and the unchanged list and total. This visual proof supplements, rather than replaces, the direct non-visual submission-boundary check described above.
 
 After local checks pass, the implementation agent supplies the finished static build directory to `publish_preview`. The trusted service publishes it through `static-preview-v1` to an immutable, run-owned, nonproduction Cloudflare Pages URL. Browser demonstrations run against that URL, and anonymous access is verified before handoff. No CI workflow, repository Pages setup, backend deployment, account setup, or production release is part of this change.
 
@@ -162,7 +191,10 @@ After local checks pass, the implementation agent supplies the finished static b
 | Saved JSON, version, or any expense is invalid | Render no partial expenses, preserve the raw value, block mutations, and offer confirmed clearing. |
 | Reading or clearing storage throws | Preserve the existing value, block mutations, explain that saved data is inaccessible, and offer read retry. |
 | A mutation write throws or quota is exceeded | Do not commit the candidate state; retain the draft where applicable and show that the operation was not saved. |
-| An action references an ID no longer present | Treat it as a no-op, announce that the expense is no longer available, and do not write. |
+| Preflight finds a document changed by another tab | Do not write the stale candidate; adopt and render the valid latest document, preserve an add/edit draft, and require review and retry. |
+| A `storage` event supplies an invalid document | Do not partially load it or write over it; enter blocked recovery and explain that externally changed saved data is invalid. |
+| An action references an ID no longer present | Treat it as a rejected no-op, announce that the expense is no longer available, and do not write. |
+| A successful add/edit would be hidden by the active category | Select `All`, announce the reason, and derive the new visible list and all-expense total. |
 | The active filter has no matching expenses | Show the filtered empty state and a visible total of `€0.00`; keep canonical expenses unchanged. |
 | An expense name resembles markup | Insert it as literal text so it cannot create elements or execute markup. |
 | Preview publication fails or the returned URL does not load the reviewed build anonymously | Do not hand off. Correct the static build or publication input, republish, rerun affected browser scenarios, and use the new immutable URL. |
@@ -170,17 +202,19 @@ After local checks pass, the implementation agent supplies the finished static b
 ## Risks / Trade-offs
 
 - [Browser-local data can be cleared and does not move between browsers or devices] → Describe persistence as specific to this browser and do not imply account-backed durability.
+- [Two tabs can pass their pre-write reads before either writes because `localStorage` is not transactional] → Re-read immediately before every write and consume `storage` events to prevent ordinary stale-snapshot clobbering; document that exact simultaneous multi-tab edits are not collaboration-safe and keep server synchronization outside this canary.
 - [Write-before-commit makes the app unavailable for mutations when browser storage is denied] → Prefer an explicit failed operation over showing changes that a refresh will lose, and provide clear retry guidance.
 - [A malformed document is not partially recovered] → Preserve it unchanged and require a confirmed clear, avoiding silent totals or records assembled from untrusted partial data.
 - [Very large decimal strings make arithmetic slower] → The canary holds a small, user-managed list; exact unbounded cents avoid both floating-point errors and an unstated amount cap.
+- [Switching a mismatched category filter to `All` changes both selection and visible total] → Do it only when needed to show a successful add or edited replacement, announce the reason, and test the row and recalculated total together.
 - [Browser-native modules require deliberate state and DOM discipline] → Keep all transitions in one state owner, all persistence in one adapter, and test both pure logic and rendered flows.
 - [The declared preview is nonproduction] → Use it only as immutable review evidence and leave release and merge outside this change.
 
 ## Migration Plan
 
 1. Ship the static client with storage key `expense-tracker:v1`, document version `1`, and no seed expenses. A first visit starts empty.
-2. Run domain, storage, and rendered-browser checks at the 1440 by 900 desktop viewport, including actual reloads after successful add, edit, and delete operations.
+2. Run domain, storage, and rendered-browser checks at the 1440 by 900 desktop viewport, including actual reloads after successful add, edit, and delete operations and deterministic simulated cross-tab changes.
 3. Build the exact reviewed client into a finished static directory and publish that directory with the declared `static-preview-v1` path.
-4. Run the chosen ordered demonstrations against the immutable preview, using a fresh browser context and known data for each scenario. Capture all required observed states before resetting the next scenario.
+4. Run the chosen ordered demonstrations against the immutable preview, using a fresh browser context and known data for each scenario. Capture all required observed states before resetting the next scenario and label the harness-forced invalid-category probe.
 5. Verify the preview anonymously and attach its URL and real browser evidence to the implementation pull request. Leave the pull request unmerged and the preview unreleased.
 6. If the built result or preview is wrong, correct the client, rebuild, republish to a new immutable URL, and recapture affected evidence. No production rollback or data migration is required; version validation prevents an incompatible future document from being read as version `1`.
