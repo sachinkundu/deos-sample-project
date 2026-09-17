@@ -20,6 +20,7 @@ D1 and R2 do not provide a shared transaction. The design therefore reserves eve
 - General account, authorization, synchronization, search, collaboration, or editing architecture.
 - A durable public deployment, CI deployment workflow, or provider setup outside the supported temporary environment.
 - Automatic recovery of an indeterminate abandoned save reservation. Such a reservation remains bounded and visible to retries until the disposable environment is removed.
+- A timer, queue, alarm, or background service for incomplete deletes. Recovery is an explicit user retry through the existing delete route.
 
 ## Component diagram
 
@@ -45,7 +46,7 @@ D1 and R2 do not provide a shared transaction. The design therefore reserves eve
 
 The Worker owns both API routes and static delivery so the browser needs no CORS policy or separate service URL. Requests under `/api/` are never passed to static assets. A known API path with an unsupported method returns JSON `405 METHOD_NOT_ALLOWED` with an `Allow` header; an unknown `/api/` path returns JSON `404 NOT_FOUND`. Outside `/api/`, `GET` and `HEAD` use `ASSETS.fetch`, including its normal missing-asset response, while every other method returns `405` and never receives the app shell.
 
-The browser keeps only transient view state: list metadata, selected snippet, one pending save tuple, pending actions, and the latest message. It does not persist snippets in browser storage. Every page load rebuilds the list from `GET /api/snippets`, so refresh and fresh-browser behavior exercise cloud persistence.
+The browser keeps only transient view state: list metadata, selected snippet, one pending save tuple, IDs with a request currently in flight, and the latest message. An in-flight delete ID is distinct from the server's persisted `deletePending` flag. The browser does not persist snippets in browser storage. Every page load rebuilds the list from `GET /api/snippets`, so refresh and fresh-browser behavior exercise cloud persistence.
 
 ## Event flow
 
@@ -53,7 +54,7 @@ The browser keeps only transient view state: list metadata, selected snippet, on
 
 | Action | Route | Successful result | Error behavior |
 | --- | --- | --- | --- |
-| List | `GET /api/snippets` | `200` with at most 100 D1-backed metadata items ordered by `created_at DESC, id DESC` | `500` with a list-specific error |
+| List | `GET /api/snippets` | `200` with at most 100 D1-backed active items or incomplete-delete recovery items, ordered by `created_at DESC, id DESC` | `500` with a list-specific error |
 | Save | `POST /api/snippets` | `201` for a new save or `200` for an exact active replay, after D1 and R2 are confirmed | `400` invalid input/ID, `409` conflict or capacity limit, `413` oversized request, `500` storage failure |
 | Read | `GET /api/snippets/:id` | `200` with metadata and the body read from the row's R2 key | `400` invalid ID, `404` no row, `409` incomplete delete, `500` storage failure |
 | Delete | `DELETE /api/snippets/:id` | Idempotent `204` only for an existing `active`, `deleting`, or `deleted` operation after the snippet row and every object in its isolated R2 prefix are absent | `400` invalid ID, `404` no saved operation, `409` save still creating, `500` unconfirmed cleanup |
@@ -77,7 +78,7 @@ All lifecycle transitions use D1's transactional `batch()` for related statement
 
 1. The browser validates the fields, generates one canonical UUIDv4 for the save intent, and keeps the immutable `{ id, title, text }` tuple in pending view state. An unconfirmed retry always reuses that tuple. A later intentional save receives a new ID.
 2. The Worker validates the full request, computes SHA-256 over an unambiguous length-delimited title/body payload, computes the body SHA-256 and byte count, and derives the only permitted object key: `snippets/<id>/<body-sha256>.txt`.
-3. Before any R2 call, the Worker inserts a `creating` operation containing the payload fingerprint, exact key, reserved bytes, and a random owner token. The insert's trigger enforces all row, object, and byte ceilings in that statement. An existing operation with a different fingerprint returns `409 IDEMPOTENCY_CONFLICT`. For an exact `active` replay, the Worker confirms the matching snippet row and R2 object, rechecks immediately before responding that the operation is still `active`, and returns `200` without writing. This read-only replay cannot authorize a state change; if the recheck no longer sees `active`, it follows the new state instead. `deleting`, `deleted`, or `failed` returns a non-retryable conflict and never recreates the snippet.
+3. Before any R2 call, the Worker inserts a `creating` operation containing the payload fingerprint, exact key, reserved bytes, a random owner token, a null `delete_title`, and the timestamp that will also become the snippet's `created_at`. The insert's trigger enforces all row, object, and byte ceilings in that statement. An existing operation with a different fingerprint returns `409 IDEMPOTENCY_CONFLICT`. For an exact `active` replay, the Worker confirms the matching snippet row and R2 object, rechecks immediately before responding that the operation is still `active`, and returns `200` without writing. This read-only replay cannot authorize a state change; if the recheck no longer sees `active`, it follows the new state instead. `deleting`, `deleted`, or `failed` returns a non-retryable conflict and never recreates the snippet.
 4. Only the request whose owner token created the reservation may write R2. Another request that sees `creating` never writes or deletes an object: if the expected object is absent it returns `409 SAVE_IN_PROGRESS`; if the object is present, it may finish the D1 activation using the stored immutable metadata. There is no lease takeover and no shared-candidate cleanup.
 5. The owner writes the exact body to the reserved key. It then runs one transactional D1 batch: an `INSERT ... SELECT` creates the `snippets` row only while the matching operation is still `creating` with that owner token, and a conditional `UPDATE ... WHERE id = ? AND state = 'creating' AND owner_token = ?` changes the operation to `active`. Both statements use the same guard and must each affect one row for this request to report activation; if both affect zero, the request lost the precondition, made no change, and reloads the operation, while any statement error rolls the batch back. An exact retry that finds the expected R2 object uses the same batch with the stored payload fingerprint as its guard; D1 serialization lets only one activation commit. If a snippet row already exists outside a matching active operation, the Worker reports an integrity error rather than advancing state. The title becomes list-visible only when the operation is `active`. The Worker returns success only after the active rows match and the R2 object exists.
 6. If the R2 write definitely fails and prefix inspection confirms no object exists, the owner changes the operation to `failed` and releases its reserved bytes before returning `500`. If the outcome or prefix cannot be confirmed, the operation remains `creating` with its reservation charged; this bounds any possible object and prevents a second writer. A later exact retry can activate an already-present object but cannot issue another put while state remains `creating`.
@@ -85,17 +86,17 @@ All lifecycle transitions use D1's transactional `batch()` for related statement
 
 ### Delete
 
-1. The browser sends the selected canonical ID and keeps its confirmed state visible while the request is pending.
-2. The Worker reads the operation fence. `creating` returns `409 SAVE_IN_PROGRESS` and does not touch R2. A missing operation or a `failed` save returns `404` and does not claim deletion succeeded; this is safe because the browser offers delete only for a D1-listed saved snippet. `deleted` follows the idempotent absence check. For `active`, one conditional `UPDATE ... WHERE id = ? AND state = 'active'` claims `deleting`; a one-row result owns the transition, while a zero-row result reloads the operation and follows `deleting` or `deleted`. A concurrent `deleting` request joins that forward-only cleanup. POST replay can no longer write or activate after the committed transition.
-3. The Worker removes every object under the isolated `snippets/<id>/` prefix and deletes the saved `snippets` row. It never restores an object. Concurrent delete requests perform the same idempotent steps. `snippet_operations.state` is the only lifecycle state; the index row has no duplicate state to update.
-4. After D1 confirms that the saved row is absent and R2 confirms the prefix is empty, the Worker changes the operation to permanent `deleted`, clears its reserved bytes and owner token, and returns `204`. The small tombstone is not a saved snippet row and is excluded from list/read; it prevents every delayed or replayed POST for that ID from recreating deleted data.
-5. Any unconfirmed store call leaves the operation `deleting` and its bytes reserved, returns `500`, and reports that deletion was not confirmed. Retry resumes cleanup. On `204`, including retry after a lost response, the browser removes only that ID, clears its reader, announces success, and reloads the list.
+1. The browser sends the selected canonical ID through the existing `DELETE /api/snippets/:id` route, adds that ID to its in-flight delete set, and keeps the item visible. Only that local in-flight marker displays “Deleting…” and disables its delete control.
+2. The Worker reads the operation fence. `creating` returns `409 SAVE_IN_PROGRESS` and does not touch R2. A missing operation or a `failed` save returns `404` and does not claim deletion succeeded; this is safe because the browser offers delete only for a listed active or recovery item. `deleted` follows the idempotent absence check. For `active`, one guarded D1 statement changes the operation to `deleting` and copies the current snippet title into `delete_title`; it succeeds only while the operation is `active` and its snippet row exists. A one-row result owns the transition, while a zero-row result reloads the operation and follows `deleting` or `deleted`. Capturing `delete_title` in the same statement ensures that a later missing index row cannot erase the public recovery item. A concurrent `deleting` request joins that forward-only cleanup. POST replay can no longer write or activate after the committed transition.
+3. The Worker removes every object under the isolated `snippets/<id>/` prefix and deletes the saved `snippets` row. It never restores an object. Concurrent delete requests perform the same idempotent steps. `snippet_operations.state` is the only lifecycle state; the index row has no duplicate state to update. While cleanup is incomplete, the operation's canonical ID and copied title remain the source of a public recovery item even when the index row is already absent.
+4. After D1 confirms that the saved row is absent and R2 confirms the prefix is empty, the Worker changes the operation to permanent `deleted`, clears its reserved bytes, owner token, and `delete_title`, and returns `204`. The small tombstone is not a saved snippet row and is excluded from list/read; it prevents every delayed or replayed POST for that ID from recreating deleted data.
+5. Any unconfirmed store call leaves the operation `deleting` and its bytes reserved, returns `500`, and reports that deletion was not confirmed. The browser clears the local in-flight marker, retains or reloads the same ID as `deletePending`, and shows an enabled “Retry delete” action beside a deletion-incomplete message. A page refresh reaches the same state from the list response. That action calls the same idempotent `DELETE` route; it does not create a second recovery API or claim success early. While its retry is in flight it again shows “Deleting…” and disables only that control. On `204`, including retry after a lost response, the browser removes only that ID, clears its reader, announces success, and reloads the list.
 
 The operation state is the ordering fence: `creating → active → deleting → deleted`, with `creating → failed` only after absence is proven. No backward transition exists. A successful delete is therefore always fenced by a pre-existing operation, a delete cannot pass an in-flight save, a save replay cannot pass a delete, and no request cleans an object owned by another payload. An unknown-ID delete returns `404`, so it makes no deletion guarantee that a later first save could violate.
 
 ## Minimal data model
 
-Both tables live in the one provisioned D1 binding. `snippets` is the saved index required by the specification; `snippet_operations` is bounded coordination metadata and is never returned as shelf content.
+Both tables live in the one provisioned D1 binding. `snippets` is the saved index required by the specification. `snippet_operations` is bounded coordination metadata; the API never returns its key, hashes, token, bytes, or raw state. For an incomplete delete only, the list projects its canonical ID and copied title as ordinary public metadata so a person can retry cleanup.
 
 ```sql
 CREATE TABLE IF NOT EXISTS snippet_operations (
@@ -106,6 +107,7 @@ CREATE TABLE IF NOT EXISTS snippet_operations (
   state TEXT NOT NULL CHECK (state IN
     ('creating', 'active', 'deleting', 'deleted', 'failed')),
   owner_token TEXT,
+  delete_title TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -142,7 +144,9 @@ END;
 
 The Worker validates canonical IDs because SQLite checks are not used as a substitute for the route/body validator. Operation insertion is the sole gateway to an R2 put, and one operation has one immutable key and at most one body. Consequently every possible R2 object is represented in the reserved-byte sum before it can exist. A failed or deleting operation retains reservation until absence is confirmed; cleanup failure cannot evade the cap.
 
-`snippet_operations.state` is authoritative for every lifecycle decision; `snippets` contains index data only. List queries join the tables and include operation states `active` or `deleting`. They return `id`, `title`, `created_at`, and `deletePending`, derived as `operation.state = 'deleting'`; key, fingerprint, token, and raw state stay internal. The browser shows a `deletePending` title with a “Deleting…” marker, disables selection and further delete actions for it, and clears the reader if that ID had been selected. Read queries join the tables, return the R2 body only when operation state is `active`, return `409 DELETE_IN_PROGRESS` for `deleting`, and return `404` for all other or absent states. Selected bodies always use `snippets.object_key`. Deleted operation tombstones use zero reserved bytes and cannot appear in list/read.
+`snippet_operations.state` is authoritative for every lifecycle decision; `snippets` contains index data only. The reservation timestamp is also the snippet `created_at`, so its ordering remains stable if the index row disappears during delete cleanup. List queries include `active` operations joined to their snippet rows and `deleting` operations left-joined to any remaining row. They return only `id`, `title`, `created_at`, and `deletePending`. For `deleting`, title is `COALESCE(snippets.title, snippet_operations.delete_title)` and `deletePending` is true; `delete_title` must be non-null because it was captured by the guarded transition. Key, hashes, token, bytes, and raw state stay internal. Thus a failed cleanup remains discoverable by the same ID without presenting the operation ledger itself as shelf content.
+
+The browser does not offer reading for `deletePending` items and clears the reader if that ID had been selected. When no delete request for that ID is locally in flight, it labels the item “Deletion incomplete” and enables “Retry delete.” When a request is in flight, it labels the item “Deleting…” and disables the control. Read queries check operation state, return the R2 body only for `active`, return `409 DELETE_IN_PROGRESS` for `deleting` even if the snippet row is absent, and return `404` for all other or absent states. Selected bodies always use `snippets.object_key`. The confirmed transition to `deleted` clears `delete_title`; deleted operation tombstones use zero reserved bytes and cannot appear in list/read.
 
 ## Decisions
 
@@ -157,6 +161,10 @@ D1 is the serialization point. A bounded, non-stealable `creating` record is wri
 ### Permanent bounded tombstones fence deletion
 
 Successful deletion of an existing saved operation removes the saved index row and body, then retains only a zero-byte operation tombstone. This makes delayed save replay distinguish “never used” from “already deleted.” Unknown IDs return `404` rather than pretending to establish a fence. Pruning tombstones was rejected because it would reopen stale IDs. The 1,000-operation lifetime ceiling bounds D1 growth; reaching it produces a clear error and the disposable environment can be reprovisioned rather than adding account or maintenance infrastructure.
+
+### User-driven retry for incomplete deletion
+
+The delete transition copies only the public title into its bounded operation record. Until cleanup is confirmed, the list can therefore project a recovery item with the original ID even after the saved index row is gone. The browser separates persisted `deletePending` from its local request-in-flight set and offers the same idempotent DELETE as “Retry delete” whenever no request is running. Keeping “Deleting…” forever was rejected because it strands transient failures; adding a background recovery service or a separate recovery endpoint was rejected as outside this canary's scope.
 
 ### Server-authoritative validation and text-safe rendering
 
@@ -179,13 +187,14 @@ Client checks improve feedback, but Worker validation and D1 triggers protect st
 | Save response is lost after activation | Exact replay returns the original active row; no duplicate is created. |
 | Delete meets `creating` save | Return `409 SAVE_IN_PROGRESS`; do not pass or cancel the save. |
 | Delete names an unknown ID or failed save | Return `404`; do not report deletion success or create a tombstone. |
-| Delete fails after its forward transition | Keep `deleting` and reserved bytes; retry removes prefix and saved row, never restores data. |
+| Delete fails after its forward transition | Keep `deleting`, reserved bytes, ID, and copied title; return the recovery item from list and enable “Retry delete” after the local request ends or the page reloads. The retry uses the same DELETE route, removes the prefix and saved row, and never restores data. |
 | Delete response is lost | Retry sees `deleting`/`deleted`, finishes confirmation, and returns idempotent `204`. |
 | D1 row is absent on read | Return `404`, clear stale selected data, and say the snippet no longer exists. |
 | R2 body is absent for an active row | Return read failure, render no stale body, and log the indexed mismatch. |
 | Browser response is interrupted/malformed | Keep confirmed UI state; save reconciles the same ID and delete reports unconfirmed status before idempotent retry. |
 | Reads finish out of order | Ignore a body response whose ID is no longer selected. |
-| A listed row is `deletePending` | Show it disabled with “Deleting…”, do not read it, and clear its stale reader content. |
+| A listed item is `deletePending` with no local request | Show “Deletion incomplete” and an enabled “Retry delete”; do not read it, and clear its stale reader content. |
+| A delete request is locally in flight | Show “Deleting…” and disable that item's delete control until the request settles. |
 | Unsupported method or unknown API path | Return `405` with `Allow` for a known route/method mismatch or JSON `404` for an unknown `/api/` path; never call `ASSETS.fetch`. |
 | Static asset request fails | Return the asset response as-is; never rewrite an `/api` error as the app shell. |
 
@@ -203,6 +212,7 @@ Client checks improve feedback, but Worker validation and D1 triggers protect st
 2. Publish through the supported temporary Worker publisher; add no CI workflow, production account setup, or unsupported infrastructure.
 3. Collect review scenarios in one order with application and harness fixed. Start every scenario in a fresh browser context with declared known data. In the persistence scenario, save `Greeting` and `Sign-off`, delete `Sign-off`, then require a second fresh browser context against that unchanged cloud state before any reset. Capture each result before resetting for the next scenario.
 4. Cover blank-input messaging, two saves, correct body selection, refresh persistence, one deletion, survival of `Greeting`, and the required fresh-context capture showing that `Greeting` remains readable while deleted `Sign-off` does not return. Capture matching saved-index/operation-state D1 readback and R2 prefix/object inspection while that scenario data exists.
-5. Publish the ordered evidence to the implementation pull request, then remove the temporary resources while leaving evidence available. Keep the implementation pull request unmerged.
+5. Include a deterministic browser/API failure-and-retry check in the implementation work. Force cleanup to fail after the operation reaches `deleting` and after the snippet row can be absent; assert a non-success response, the same ID's recovery item, the enabled “Retry delete” after request completion and after refresh, a retry through the same DELETE route, and `204` only after D1 and R2 absence checks pass. Also assert that the other snippet remains readable. This test uses an injected store failure in the test harness, not a background recovery service.
+6. Publish the ordered evidence to the implementation pull request, then remove the temporary resources while leaving evidence available. Keep the implementation pull request unmerged.
 
 Rollback is deletion of the disposable environment. If validation fails before evidence publication, discard it, correct the implementation, and provision a clean one; no production data or schema rollback exists.
