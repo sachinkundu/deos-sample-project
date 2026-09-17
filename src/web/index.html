@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="A small cloud-backed shelf for plain text snippets."
+    />
+    <title>Snippet shelf</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="masthead">
+        <div class="brand-mark" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </div>
+        <div class="heading-copy">
+          <p class="eyebrow">Personal reference</p>
+          <h1>Snippet shelf</h1>
+          <p>Keep the words you reach for often, close at hand.</p>
+        </div>
+        <div class="cloud-badge">
+          <span aria-hidden="true"></span> Cloud-backed · D1 + R2
+        </div>
+      </header>
+
+      <div
+        id="status"
+        class="status"
+        data-status="idle"
+        role="status"
+        aria-live="polite"
+      >
+        <span class="status-dot" aria-hidden="true"></span>
+        <span id="status-text">Ready for a new snippet.</span>
+      </div>
+
+      <main class="workspace">
+        <section
+          class="panel editor-panel"
+          aria-labelledby="new-snippet-heading"
+        >
+          <div class="panel-heading">
+            <p class="step">01</p>
+            <div>
+              <h2 id="new-snippet-heading">New snippet</h2>
+              <p>Give a useful phrase a name.</p>
+            </div>
+          </div>
+
+          <form id="snippet-form" novalidate>
+            <label for="title">Title</label>
+            <div class="field-wrap">
+              <input
+                id="title"
+                name="title"
+                type="text"
+                autocomplete="off"
+                maxlength="200"
+                placeholder="e.g. Greeting"
+              />
+              <output id="title-count" for="title">0 / 200 bytes</output>
+            </div>
+
+            <label for="text">Plain text</label>
+            <div class="field-wrap text-wrap">
+              <textarea
+                id="text"
+                name="text"
+                rows="12"
+                placeholder="Write or paste the text you want to keep…"
+              ></textarea>
+              <output id="text-count" for="text">0 / 65,536 bytes</output>
+            </div>
+
+            <p class="privacy-note">
+              <span aria-hidden="true">◆</span> Stored as plain text in this
+              temporary shelf.
+            </p>
+            <button id="save-button" class="primary-button" type="submit">
+              <span>Save to shelf</span><span aria-hidden="true">→</span>
+            </button>
+
+            <div id="save-recovery" class="save-recovery" hidden>
+              <p id="save-recovery-note"></p>
+              <div class="recovery-actions">
+                <button id="check-save" type="button" class="secondary-button">
+                  Check save
+                </button>
+                <button id="start-new-save" type="button" class="text-button">
+                  Start a new save
+                </button>
+              </div>
+            </div>
+          </form>
+        </section>
+
+        <section class="panel library-panel" aria-labelledby="library-heading">
+          <div class="panel-heading library-heading-row">
+            <div class="heading-with-step">
+              <p class="step">02</p>
+              <div>
+                <h2 id="library-heading">Your shelf</h2>
+                <p id="snippet-count">Loading saved titles…</p>
+              </div>
+            </div>
+            <button
+              id="refresh-list"
+              class="icon-button"
+              type="button"
+              aria-label="Refresh snippet list"
+              title="Refresh list"
+            >
+              ↻
+            </button>
+          </div>
+          <div
+            id="snippet-list"
+            class="snippet-list"
+            aria-live="polite"
+            aria-busy="true"
+          ></div>
+        </section>
+
+        <section class="panel reader-panel" aria-labelledby="reader-heading">
+          <div class="panel-heading">
+            <p class="step">03</p>
+            <div>
+              <h2 id="reader-heading">Reader</h2>
+              <p>Selected plain text appears here.</p>
+            </div>
+          </div>
+          <div id="reader" class="reader" data-reader-state="empty">
+            <div id="reader-empty" class="reader-empty">
+              <div class="reader-glyph" aria-hidden="true">Aa</div>
+              <p>Choose a title from your shelf.</p>
+              <span>The full text will open here.</span>
+            </div>
+            <div id="reader-content" class="reader-content" hidden>
+              <p class="reader-label">Now reading</p>
+              <h3 id="reader-title"></h3>
+              <pre id="reader-text"></pre>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer>
+        <p>Temporary canary shelf</p>
+        <p>D1 keeps the index · R2 keeps each body</p>
+      </footer>
+    </div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

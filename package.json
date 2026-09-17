@@ -1,0 +1,23 @@
+{
+  "name": "snippet-shelf-canary",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "format": "prettier --write \"src/**/*.{ts,js,css,html}\" \"tests/**/*.ts\" \"scripts/**/*.mjs\" \"package*.json\" \"tsconfig.json\" \"vitest.config.ts\"",
+    "format:check": "prettier --check \"src/**/*.{ts,js,css,html}\" \"tests/**/*.ts\" \"scripts/**/*.mjs\" \"package*.json\" \"tsconfig.json\" \"vitest.config.ts\"",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --coverage.enabled=false",
+    "check": "npm run format:check && npm run typecheck && npm test && npm run build"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "latest",
+    "esbuild": "^0.25.10",
+    "miniflare": "3.20250718.3",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4",
+    "happy-dom": "latest"
+  }
+}
